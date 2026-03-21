@@ -1,0 +1,49 @@
+# Python cache
+
+**pycache**/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+
+venv/
+.env/
+.env.*
+
+# Git
+
+.git/
+.gitignore
+
+# IDE
+
+.vscode/
+.idea/
+
+# OS
+
+.DS_Store
+Thumbs.db
+
+# Logs
+
+*.log
+
+# Docker
+
+docker-compose.yml
+Dockerfile
+
+# Database files (если появятся)
+
+*.sqlite3
+
+# Node (если вдруг будет фронт)
+
+node_modules/
+
+# Tests / coverage
+
+.coverage
+htmlcov/

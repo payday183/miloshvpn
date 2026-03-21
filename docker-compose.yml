@@ -1,0 +1,95 @@
+services:
+
+  backend:
+    build: .
+    container_name: vpn_backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://user:password@db:5432/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  bot:
+    build: .
+    container_name: vpn_bot
+    command: python -m bot.bot
+    env_file:
+      - .env
+    environment:
+      BACKEND_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker_vpn:
+    build: .
+    container_name: vpn_worker_vpn
+    command: python -m worker.vpn_worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://user:password@db:5432/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  worker_retry:
+    build: .
+    container_name: vpn_worker_retry
+    command: python -m worker.retry_worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://user:password@db:5432/app
+    depends_on:
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+  db:
+    image: postgres:15
+    container_name: vpn_postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: app
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d app"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    container_name: vpn_redis
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
