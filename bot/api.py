@@ -79,6 +79,9 @@ def _validate_bot_response(data: dict[str, Any]) -> BotResponse:
                 raise BackendError("Сервер вернул кнопку без text.")
             if not isinstance(button.get("action"), str):
                 raise BackendError("Сервер вернул кнопку без action.")
+            web_app = button.get("web_app")
+            if web_app is not None and not isinstance(web_app, str):
+                raise BackendError("Сервер вернул кнопку с некорректным web_app.")
 
     return data
 

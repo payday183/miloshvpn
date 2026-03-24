@@ -5,7 +5,9 @@ import os
 import time
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlencode
 
+from backend.config import settings
 from backend.models.orm import PaymentORM, UserORM
 from backend.services.payment_service import PaymentService
 from backend.services.subscription_service import (
@@ -14,6 +16,7 @@ from backend.services.subscription_service import (
 )
 from backend.services.user_service import PermissionDeniedError, UserService
 from backend.services.vpn_service import VPNService
+from backend.services.webapp_auth_service import WebAppAuthService
 from shared.redis import redis_client
 
 
@@ -75,11 +78,13 @@ class BotService:
         payment_service: PaymentService,
         subscription_service: SubscriptionService,
         vpn_service: VPNService,
+        webapp_auth_service: WebAppAuthService,
     ) -> None:
         self.user_service = user_service
         self.payment_service = payment_service
         self.subscription_service = subscription_service
         self.vpn_service = vpn_service
+        self.webapp_auth_service = webapp_auth_service
 
     def open_session(
         self,
@@ -158,6 +163,8 @@ class BotService:
             return self._handle_payment_code_step(user, action)
 
         if action == ACTION_PROFILE:
+            if not self._telegram_webapp_enabled():
+                return self._response(user, self._browser_profile_ui(user))
             return self._response(user, self._profile_ui(user))
 
         if action == ACTION_BUY:
@@ -795,7 +802,6 @@ class BotService:
             buttons.extend(
                 [
                     [self._button("👨‍💼 Модеры", ACTION_MODERS)],
-                    [self._button("📊 Аналитика", ACTION_ANALYTICS)],
                     [self._button("➕ Добавить модера", ACTION_ADD_MODER)],
                     [self._button("➖ Удалить модера", ACTION_REMOVE_MODER)],
                     [self._button("💳 Платежи", ACTION_PAYMENTS)],
@@ -803,9 +809,18 @@ class BotService:
                 ]
             )
 
-        buttons.append([self._button("👤 Профиль", ACTION_PROFILE)])
+        buttons.append(
+            [self._web_app_button("👤 Профиль", ACTION_PROFILE, self._profile_webapp_path(user))]
+        )
+        message_text = text or f"Меню ({user.role})"
+        if not self._telegram_webapp_enabled():
+            message_text = (
+                f"{message_text}\n\n"
+                "Mini App в Telegram пока отключен: Telegram принимает только HTTPS-ссылки.\n"
+                "Нажмите «👤 Профиль», и бот пришлет персональную ссылку для браузера."
+            )
         return {
-            "text": text or f"Меню ({user.role})",
+            "text": message_text,
             "keyboard": buttons,
         }
 
@@ -819,6 +834,20 @@ class BotService:
                 f"Роль: {user.role}\n"
                 f"Статус подписки: {self._subscription_status_text(user.id)}\n"
                 f"VPN: {self._vpn_status_text(user.id)}"
+            ),
+            "keyboard": [[self._button("⬅️ Назад", ACTION_BACK)]],
+        }
+
+    def _browser_profile_ui(self, user: UserORM) -> dict[str, Any]:
+        browser_url = self._browser_login_url(user)
+        panel_name = "админ-панель" if user.role == "admin" else "личный кабинет"
+        return {
+            "text": (
+                f"{self._profile_ui(user)['text']}\n\n"
+                f"Mini App внутри Telegram для {panel_name} заработает после подключения HTTPS-домена.\n"
+                "Пока можно войти через персональную браузерную ссылку:\n"
+                f"{browser_url}\n\n"
+                "Ссылка уже привязана к вашему Telegram ID."
             ),
             "keyboard": [[self._button("⬅️ Назад", ACTION_BACK)]],
         }
@@ -878,6 +907,32 @@ class BotService:
             "text": text,
             "action": action,
         }
+
+    def _web_app_button(self, text: str, action: str, path: str) -> dict[str, str]:
+        button = self._button(text, action)
+        if self._telegram_webapp_enabled():
+            button["web_app"] = self._web_app_url(path)
+        return button
+
+    def _web_app_url(self, path: str) -> str:
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        return f"{settings.public_base_url.rstrip('/')}{normalized_path}"
+
+    def _browser_login_url(self, user: UserORM) -> str:
+        scope = "admin" if user.role == "admin" else "user"
+        _, session = self.webapp_auth_service.create_browser_session(
+            telegram_id=user.telegram_id,
+            username=user.username,
+            scope=scope,
+        )
+        query = urlencode({"session_token": session.session_token})
+        return f"{self._web_app_url(self._profile_webapp_path(user))}?{query}"
+
+    def _profile_webapp_path(self, user: UserORM) -> str:
+        return "/webapp/admin" if user.role == "admin" else "/webapp/user"
+
+    def _telegram_webapp_enabled(self) -> bool:
+        return settings.public_base_url.strip().lower().startswith("https://")
 
     def _set_online(self, telegram_id: int) -> None:
         redis_client.set(

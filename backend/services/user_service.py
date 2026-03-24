@@ -44,13 +44,13 @@ class UserService:
     def require_user(self, user_id: int) -> UserORM:
         user = self.get_user(user_id)
         if user is None:
-            raise UserNotFoundError(f"User {user_id} was not found.")
+            raise UserNotFoundError(f"Пользователь {user_id} не найден.")
         return user
 
     def require_user_by_telegram_id(self, telegram_id: int) -> UserORM:
         user = self.user_repo.get_by_telegram_id(telegram_id)
         if user is None:
-            raise UserNotFoundError(f"User with telegram_id {telegram_id} was not found.")
+            raise UserNotFoundError(f"Пользователь с Telegram ID {telegram_id} не найден.")
         return user
 
     def assign_moderator(
@@ -61,14 +61,14 @@ class UserService:
     ) -> UserORM:
         actor = self.require_user_by_telegram_id(actor_telegram_id)
         if actor.role != "admin":
-            raise PermissionDeniedError("Only admin can assign moderators.")
+            raise PermissionDeniedError("Только админ может назначать модераторов.")
 
         existing = self.user_repo.get_by_telegram_id(target_telegram_id)
 
         if target_telegram_id in settings.admin_ids or (
             existing is not None and existing.role == "admin"
         ):
-            raise PermissionDeniedError("Admin role cannot be changed.")
+            raise PermissionDeniedError("Роль админа нельзя изменить.")
 
         if existing is None:
             return self.user_repo.create(
@@ -88,11 +88,11 @@ class UserService:
     def remove_moderator(self, actor_telegram_id: int, target_telegram_id: int) -> UserORM:
         actor = self.require_user_by_telegram_id(actor_telegram_id)
         if actor.role != "admin":
-            raise PermissionDeniedError("Only admin can remove moderators.")
+            raise PermissionDeniedError("Только админ может удалять модераторов.")
 
         user = self.user_repo.get_by_telegram_id(target_telegram_id)
         if user is None or user.role != "moder":
-            raise PermissionDeniedError("Not a moderator")
+            raise PermissionDeniedError("Это не модератор.")
 
         user.role = "user"
         return self.user_repo.save(user)

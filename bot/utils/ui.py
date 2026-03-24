@@ -6,16 +6,28 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+    WebAppInfo,
 )
 
 
-def render_keyboard(layout: list[list[dict[str, str]]]):
+def render_button(button: dict[str, Any]) -> KeyboardButton:
+    text = str(button.get("text", ""))
+    web_app_url = button.get("web_app")
+    if isinstance(web_app_url, str) and web_app_url.strip():
+        return KeyboardButton(
+            text=text,
+            web_app=WebAppInfo(url=web_app_url.strip()),
+        )
+    return KeyboardButton(text=text)
+
+
+def render_keyboard(layout: list[list[dict[str, Any]]]):
     if not layout:
         return None
 
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=button["text"]) for button in row]
+            [render_button(button) for button in row]
             for row in layout
         ],
         resize_keyboard=True,

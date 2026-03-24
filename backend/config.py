@@ -21,7 +21,10 @@ class Settings:
     bot_token: str
 
     admin_ids: set[int]
-    
+    yookassa_shop_id: str
+    yookassa_secret_key: str
+    yookassa_mode: str
+    yookassa_api_base_url: str
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -38,6 +41,13 @@ class Settings:
             bot_token=os.getenv("BOT_TOKEN", ""),
 
             admin_ids=parse_admin_ids(os.getenv("ADMIN_IDS", "")),
+            yookassa_shop_id=os.getenv("YOOKASSA_SHOP_ID", "").strip(),
+            yookassa_secret_key=os.getenv("YOOKASSA_SECRET_KEY", "").strip(),
+            yookassa_mode=os.getenv("YOOKASSA_MODE", "test").strip() or "test",
+            yookassa_api_base_url=os.getenv(
+                "YOOKASSA_API_BASE_URL",
+                "https://api.yookassa.ru/v3",
+            ).rstrip("/"),
         )
 
 

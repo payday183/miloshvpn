@@ -9,4 +9,4 @@ RUN pip install uvloop
 
 COPY . .
 
-CMD ["uvicorn", "backend.api.routes:create_app", "--host", "0.0.0.0", "--port", "8000", "--loop", "uvloop", "--workers", "2"]
+CMD ["/bin/sh", "-c", "python -m backend.bootstrap && exec uvicorn backend.api.routes:create_app --factory --host 0.0.0.0 --port 8000 --loop uvloop --workers ${UVICORN_WORKERS:-2}"]

@@ -1,4 +1,6 @@
 from datetime import timedelta
+from math import ceil
+
 from backend.models.orm import SubscriptionORM
 from shared.postgres import SessionLocal
 from shared.utils import utc_now
@@ -67,6 +69,8 @@ class SubscriptionService:
             if existing:
                 existing.plan = plan
                 existing.ends_at = existing.ends_at + timedelta(days=days)
+                if source_payment_id is not None:
+                    existing.source_payment_id = source_payment_id
                 db.commit()
                 db.refresh(existing)
                 return existing
@@ -77,6 +81,7 @@ class SubscriptionService:
                 status="active",
                 started_at=now,
                 ends_at=now + timedelta(days=days),
+                source_payment_id=source_payment_id,
             )
 
             db.add(sub)
@@ -111,3 +116,11 @@ class SubscriptionService:
             return db.query(SubscriptionORM).all()
         finally:
             db.close()
+
+    def get_days_left(self, subscription: SubscriptionORM | None) -> int | None:
+        if subscription is None or subscription.ends_at is None:
+            return None
+        remaining_seconds = (subscription.ends_at - utc_now()).total_seconds()
+        if remaining_seconds <= 0:
+            return 0
+        return int(ceil(remaining_seconds / 86400))
