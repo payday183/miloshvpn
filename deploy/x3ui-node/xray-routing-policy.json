@@ -2,6 +2,7 @@
   "outbounds": [
     {
       "protocol": "blackhole",
+      "settings": {},
       "tag": "blocked"
     }
   ],
@@ -25,6 +26,44 @@
       {
         "type": "field",
         "port": "6881-6999",
+        "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
+        "port": "51413",
+        "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
+        "port": "1080,3128,8118,9001,9030,9040,9050-9051,9150-9151",
+        "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "domain:torproject.org",
+          "domain:check.torproject.org",
+          "domain:bridges.torproject.org",
+          "domain:metrics.torproject.org",
+          "domain:onion.to",
+          "domain:onion.cab",
+          "domain:tor2web.org",
+          "regexp:.*\\.onion$"
+        ],
+        "outboundTag": "blocked"
+      },
+      {
+        "type": "field",
+        "domain": [
+          "geosite:category-ads-all",
+          "domain:doubleclick.net",
+          "domain:googleadservices.com",
+          "domain:googlesyndication.com",
+          "domain:googletagservices.com",
+          "domain:google-analytics.com",
+          "domain:adservice.google.com",
+          "domain:ads.youtube.com"
+        ],
         "outboundTag": "blocked"
       }
     ]

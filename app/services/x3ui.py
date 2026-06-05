@@ -50,6 +50,9 @@ class X3UIError(RuntimeError):
     pass
 
 
+CLIENT_IP_LIMIT = 1
+
+
 class X3UIClient:
     def __init__(self, settings: Settings | None = None, node: VpnNode | None = None) -> None:
         self.settings = settings or get_settings()
@@ -82,6 +85,7 @@ class X3UIClient:
                         "expiryTime": expiry_ms,
                         "totalGB": total_gb,
                         "tgId": str(telegram_id or ""),
+                        "limitIp": CLIENT_IP_LIMIT,
                         "subId": client_uuid.replace("-", "")[:16],
                     }
                 ]
@@ -100,7 +104,7 @@ class X3UIClient:
                         "totalGB": total_gb,
                         "expiryTime": expiry_ms,
                         "tgId": telegram_id or 0,
-                        "limitIp": 0,
+                        "limitIp": CLIENT_IP_LIMIT,
                         "enable": True,
                     },
                     "inboundIds": [self.target.inbound_id],

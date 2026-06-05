@@ -34,12 +34,16 @@ Recommended values:
 There is no perfect technical guarantee that a VPN can block every illegal resource. The baseline here is:
 
 - block BitTorrent at Xray routing level;
-- block common P2P/anonymous proxy ports at firewall level;
+- block common P2P/Tor/anonymous proxy ports at Xray and firewall levels;
+- create backend-issued clients with `limitIp=1`, so one key can use one concurrent source IP;
+- block common ad/tracker domains, including Google/YouTube ad domains where domain routing can help;
 - force safe DNS and DNS blocklists where possible;
 - monitor traffic and active clients from backend admin;
 - revoke expired users automatically.
 
-Apply `xray-routing-policy.json` in 3x-ui Xray routing settings. The important rule is the BitTorrent protocol rule routed to `blocked`.
+Apply `xray-routing-policy.json` in 3x-ui Xray routing settings. The important rules are routed to the `blocked` outbound and cover BitTorrent protocol, common torrent ports, common Tor/proxy ports, Tor domains, and ad/tracker domains.
+
+YouTube ads cannot be perfectly removed with VPN domain routing alone because some ads share normal YouTube delivery domains. The policy blocks common ad/tracker domains without blocking `googlevideo.com`, so playback should keep working.
 
 Apply `nftables-abuse-guard.nft` on the host if you use nftables:
 

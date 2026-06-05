@@ -3,10 +3,15 @@ table inet miloshvpn_abuse_guard {
     type inet_service
     flags interval
     elements = {
+      1080,
+      3128,
       6881-6999,
-      6969,
       8118,
+      9001,
+      9030,
+      9040,
       9050-9051,
+      51413,
       9150-9151
     }
   }
@@ -16,7 +21,7 @@ table inet miloshvpn_abuse_guard {
     flags interval
     elements = {
       6881-6999,
-      6969,
+      51413,
       33434-33534
     }
   }
