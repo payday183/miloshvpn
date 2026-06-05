@@ -1,10 +1,10 @@
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import BotAdmin, Plan
+from app.models import BotAdmin, Plan, VpnNode
 from app.timeutils import utcnow
 
 
@@ -46,5 +46,26 @@ async def seed_defaults(session: AsyncSession) -> None:
         existing = await session.scalar(select(BotAdmin).where(BotAdmin.telegram_id == telegram_id))
         if existing is None:
             session.add(BotAdmin(telegram_id=telegram_id, added_at=utcnow()))
+
+    node_count = await session.scalar(select(func.count()).select_from(VpnNode))
+    if not node_count:
+        now = utcnow()
+        session.add(
+            VpnNode(
+                title="Local test 3x-ui",
+                mode=settings.x3ui_mode,
+                base_url=settings.x3ui_base_url,
+                username=settings.x3ui_username,
+                password=settings.x3ui_password,
+                inbound_id=settings.x3ui_inbound_id,
+                max_clients=settings.x3ui_max_clients,
+                public_host=settings.vless_public_host,
+                public_port=settings.vless_public_port,
+                vless_query=settings.vless_query,
+                is_active=True,
+                created_at=now,
+                updated_at=now,
+            )
+        )
 
     await session.commit()

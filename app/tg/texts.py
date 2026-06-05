@@ -86,8 +86,15 @@ def instruction_text() -> str:
 
 
 def admin_help_text() -> str:
+    settings = get_settings()
+    panel_url = settings.admin_panel_url
+    if settings.admin_web_token:
+        separator = "&" if "?" in panel_url else "?"
+        panel_url = f"{panel_url}{separator}token={settings.admin_web_token}"
+
     return (
         "Админка\n\n"
+        f"Web-панель: {escape(panel_url)}\n\n"
         "<code>/add_admin TELEGRAM_ID</code> - добавить админа.\n"
         "<code>/rotate_free</code> - пересоздать бесплатный ключ.\n"
         "<code>/post_free</code> - опубликовать бесплатный ключ в канал/чат из PUBLIC_KEY_CHAT_ID."

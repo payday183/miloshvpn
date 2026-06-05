@@ -3,9 +3,11 @@ from html import escape
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.models import VpnKey
+from app.services.nodes import get_active_node
 from app.services.x3ui import X3UIClient
 from app.timeutils import utcnow
 
@@ -26,17 +28,23 @@ async def get_active_public_key(session: AsyncSession) -> VpnKey | None:
 async def rotate_public_key(session: AsyncSession) -> VpnKey:
     settings = get_settings()
     now = utcnow()
+    node = await get_active_node(session)
 
     keys = (
-        await session.scalars(select(VpnKey).where(VpnKey.key_type == "public", VpnKey.active.is_(True)))
+        await session.scalars(
+            select(VpnKey)
+            .options(selectinload(VpnKey.node))
+            .where(VpnKey.key_type == "public", VpnKey.active.is_(True))
+        )
     ).all()
-    x3ui = X3UIClient(settings)
     for key in keys:
+        x3ui = X3UIClient(settings, node=key.node)
         await x3ui.revoke_client(client_uuid=key.x3ui_client_uuid)
         key.active = False
         key.revoked_at = now
 
     expires_at = now + timedelta(hours=settings.public_key_rotate_hours)
+    x3ui = X3UIClient(settings, node=node)
     client = await x3ui.create_client(
         email=f"milosh_free_{now:%Y%m%d_%H%M}",
         telegram_id=None,
@@ -44,6 +52,7 @@ async def rotate_public_key(session: AsyncSession) -> VpnKey:
         traffic_gb=5,
     )
     key = VpnKey(
+        node_id=node.id if node else None,
         user_id=None,
         subscription_id=None,
         key_type="public",

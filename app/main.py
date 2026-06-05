@@ -2,6 +2,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.admin import router as admin_router
 from app.cache import ping as redis_ping
 from app.db import get_session, init_db
 from app.models import Order, User
@@ -11,6 +12,7 @@ from app.services.stats import collect_stats
 from app.services.vpn import get_active_key, get_active_subscription
 
 app = FastAPI(title="MiloshVPN Control Center")
+app.include_router(admin_router)
 
 
 @app.on_event("startup")

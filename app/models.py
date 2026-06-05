@@ -35,6 +35,27 @@ class Plan(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class VpnNode(Base):
+    __tablename__ = "vpn_nodes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(255))
+    mode: Mapped[str] = mapped_column(String(32), default="mock")
+    base_url: Mapped[str] = mapped_column(String(512))
+    username: Mapped[str] = mapped_column(String(255))
+    password: Mapped[str] = mapped_column(String(255))
+    inbound_id: Mapped[int] = mapped_column(Integer, default=1)
+    max_clients: Mapped[int] = mapped_column(Integer, default=10)
+    public_host: Mapped[str] = mapped_column(String(255))
+    public_port: Mapped[int] = mapped_column(Integer, default=8443)
+    vless_query: Mapped[str] = mapped_column(String(512), default="type=tcp&security=none")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    keys: Mapped[list["VpnKey"]] = relationship(back_populates="node")
+
+
 class Order(Base):
     __tablename__ = "orders"
 
@@ -73,6 +94,7 @@ class VpnKey(Base):
     __tablename__ = "vpn_keys"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    node_id: Mapped[int | None] = mapped_column(ForeignKey("vpn_nodes.id"), nullable=True, index=True)
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     subscription_id: Mapped[int | None] = mapped_column(ForeignKey("subscriptions.id"), nullable=True, index=True)
     key_type: Mapped[str] = mapped_column(String(32), default="private", index=True)
@@ -86,6 +108,7 @@ class VpnKey(Base):
 
     user: Mapped[User | None] = relationship(back_populates="keys")
     subscription: Mapped[Subscription | None] = relationship(back_populates="keys")
+    node: Mapped[VpnNode | None] = relationship(back_populates="keys")
 
 
 class DonationEvent(Base):

@@ -63,6 +63,31 @@ Admin commands:
 
 If `ADMIN_IDS` is empty and `ALLOW_FIRST_ADMIN=true`, the first Telegram user who sends `/start` becomes admin.
 
+## Admin Panel
+
+Web admin panel:
+
+```text
+http://localhost:8081/admin
+```
+
+Set `ADMIN_WEB_TOKEN` to protect it:
+
+```env
+ADMIN_WEB_TOKEN=change_me
+ADMIN_PANEL_URL=http://localhost:8081/admin
+```
+
+The panel can:
+
+- connect 3x-ui nodes;
+- activate or disable nodes;
+- show active subscriptions;
+- show the node used by each active VPN key;
+- show pending DonationAlerts payments;
+- force DonationAlerts polling;
+- rotate the public free key.
+
 ## Payments
 
 Plans:

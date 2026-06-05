@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     bot_token: str = ""
     admin_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
     allow_first_admin: bool = True
+    admin_web_token: str = ""
+    admin_panel_url: str = "http://localhost:8081/admin"
 
     donationalerts_token: str = ""
     donationalerts_donate_url: str = ""
