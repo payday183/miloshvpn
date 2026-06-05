@@ -103,6 +103,25 @@ Node monitoring uses official 3x-ui panel APIs:
 
 The worker refreshes node status every `NODE_STATUS_POLL_INTERVAL_SECONDS`.
 
+New VPN keys use automatic node selection by default:
+
+```env
+NODE_SELECTION_MODE=least_loaded
+NODE_OVERLOAD_CPU_PERCENT=85
+NODE_OVERLOAD_MEMORY_PERCENT=90
+NODE_OVERLOAD_DISK_PERCENT=90
+```
+
+The backend skips offline or overloaded nodes and prefers the active online node with more free slots and lower CPU/RAM/disk/latency.
+
+New server template:
+
+```text
+deploy/x3ui-node/
+```
+
+That folder contains a standalone 3x-ui Compose file, an Xray routing policy for blocking BitTorrent, and an nftables baseline for common abuse ports. Apply and review those rules on every new node before adding it to `/admin`.
+
 ## Payments
 
 Plans:

@@ -1,0 +1,35 @@
+table inet miloshvpn_abuse_guard {
+  set blocked_tcp_ports {
+    type inet_service
+    flags interval
+    elements = {
+      6881-6999,
+      6969,
+      8118,
+      9050-9051,
+      9150-9151
+    }
+  }
+
+  set blocked_udp_ports {
+    type inet_service
+    flags interval
+    elements = {
+      6881-6999,
+      6969,
+      33434-33534
+    }
+  }
+
+  chain output {
+    type filter hook output priority 0; policy accept;
+    tcp dport @blocked_tcp_ports reject
+    udp dport @blocked_udp_ports reject
+  }
+
+  chain forward {
+    type filter hook forward priority 0; policy accept;
+    tcp dport @blocked_tcp_ports reject
+    udp dport @blocked_udp_ports reject
+  }
+}

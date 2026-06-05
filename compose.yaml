@@ -83,6 +83,10 @@ services:
     image: ghcr.io/mhsanaei/3x-ui:latest
     restart: unless-stopped
     tty: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
       XRAY_VMESS_AEAD_FORCED: "false"
       XUI_ENABLE_FAIL2BAN: "true"

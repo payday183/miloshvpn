@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.models import VpnKey
-from app.services.nodes import get_active_node
+from app.services.nodes import select_node_for_key
 from app.services.x3ui import X3UIClient
 from app.timeutils import utcnow
 
@@ -28,7 +28,7 @@ async def get_active_public_key(session: AsyncSession) -> VpnKey | None:
 async def rotate_public_key(session: AsyncSession) -> VpnKey:
     settings = get_settings()
     now = utcnow()
-    node = await get_active_node(session)
+    node = await select_node_for_key(session)
 
     keys = (
         await session.scalars(

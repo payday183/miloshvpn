@@ -6,7 +6,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.models import Subscription, User, VpnKey
-from app.services.nodes import get_active_node
+from app.services.nodes import select_node_for_key
 from app.services.x3ui import X3UIClient
 from app.timeutils import utcnow
 
@@ -70,7 +70,7 @@ async def revoke_user_private_keys(session: AsyncSession, user_id: int) -> None:
 
 async def create_private_key(session: AsyncSession, user: User, subscription: Subscription) -> VpnKey:
     settings = get_settings()
-    node = await get_active_node(session)
+    node = await select_node_for_key(session)
     node_id = node.id if node is not None else None
     max_clients = node.max_clients if node is not None else settings.x3ui_max_clients
     existing_key = await get_active_key(session, user.id)

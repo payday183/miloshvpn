@@ -1,7 +1,9 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.models import VpnNode
+from app.services.node_monitor import local_key_counts
 from app.timeutils import utcnow
 
 
@@ -11,6 +13,68 @@ async def list_nodes(session: AsyncSession) -> list[VpnNode]:
 
 async def get_active_node(session: AsyncSession) -> VpnNode | None:
     return await session.scalar(select(VpnNode).where(VpnNode.is_active.is_(True)).order_by(VpnNode.id))
+
+
+async def select_node_for_key(session: AsyncSession) -> VpnNode | None:
+    settings = get_settings()
+    if settings.node_selection_mode == "active":
+        return await get_active_node(session)
+
+    nodes = (
+        await session.scalars(
+            select(VpnNode)
+            .where(VpnNode.is_active.is_(True))
+            .order_by(VpnNode.id)
+        )
+    ).all()
+    if not nodes:
+        return None
+
+    candidates: list[tuple[float, VpnNode]] = []
+    for node in nodes:
+        counts = await local_key_counts(session, node.id)
+        active_keys = counts["private_active"]
+        free_slots = max(node.max_clients - active_keys, 0)
+        if free_slots <= 0:
+            continue
+        if node.status == "offline":
+            continue
+        if is_overloaded(node):
+            continue
+
+        load_ratio = active_keys / max(node.max_clients, 1)
+        remote_ratio = node.remote_enabled_clients / max(node.max_clients, 1)
+        cpu = (node.cpu_percent or 0) / 100
+        memory = (node.memory_percent or 0) / 100
+        disk = (node.disk_percent or 0) / 100
+        latency = min(node.last_latency_ms or 0, 5000) / 5000
+        unknown_penalty = 0.15 if node.status == "unknown" else 0
+        score = (
+            load_ratio * 0.35
+            + remote_ratio * 0.2
+            + cpu * 0.15
+            + memory * 0.15
+            + disk * 0.05
+            + latency * 0.05
+            + unknown_penalty
+        )
+        candidates.append((score, node))
+
+    if not candidates:
+        return await get_active_node(session)
+
+    return min(candidates, key=lambda item: (item[0], item[1].id))[1]
+
+
+def is_overloaded(node: VpnNode) -> bool:
+    settings = get_settings()
+    return any(
+        [
+            node.cpu_percent is not None and node.cpu_percent >= settings.node_overload_cpu_percent,
+            node.memory_percent is not None and node.memory_percent >= settings.node_overload_memory_percent,
+            node.disk_percent is not None and node.disk_percent >= settings.node_overload_disk_percent,
+        ]
+    )
 
 
 async def create_node(

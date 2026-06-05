@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     x3ui_password: str = "admin"
     x3ui_inbound_id: int = 1
     x3ui_max_clients: int = 10
+    node_selection_mode: Literal["active", "least_loaded"] = "least_loaded"
+    node_overload_cpu_percent: int = 85
+    node_overload_memory_percent: int = 90
+    node_overload_disk_percent: int = 90
     vless_public_host: str = "127.0.0.1"
     vless_public_port: int = 8443
     vless_query: str = "type=tcp&security=none"
