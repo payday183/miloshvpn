@@ -7,10 +7,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.config import Settings, get_settings
+from app.config import get_settings
 from app.db import get_session
 from app.models import Order, Subscription, VpnKey, VpnNode
 from app.services.billing import poll_donations
+from app.services.node_monitor import format_bytes, local_key_counts, refresh_all_nodes, refresh_node_status
 from app.services.nodes import activate_node, create_node, disable_node, list_nodes
 from app.services.public_keys import rotate_public_key
 from app.services.stats import collect_stats
@@ -38,9 +39,10 @@ async def admin_panel(
     token = request.query_params.get("token", "")
     stats = await collect_stats(session)
     nodes = await list_nodes(session)
+    node_counts = {node.id: await local_key_counts(session, node.id) for node in nodes}
     subscriptions = await active_subscriptions(session)
     pending_orders = await latest_pending_orders(session)
-    return HTMLResponse(render_admin_page(stats, nodes, subscriptions, pending_orders, token))
+    return HTMLResponse(render_admin_page(stats, nodes, node_counts, subscriptions, pending_orders, token))
 
 
 @router.post("/admin/nodes")
@@ -89,6 +91,31 @@ async def disable_node_action(
     return redirect_to_admin(request)
 
 
+@router.post("/admin/nodes/{node_id}/refresh")
+async def refresh_node_action(
+    node_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> RedirectResponse:
+    node = await session.get(VpnNode, node_id)
+    if node is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    await refresh_node_status(session, node)
+    await session.commit()
+    return redirect_to_admin(request)
+
+
+@router.post("/admin/nodes/refresh")
+async def refresh_nodes_action(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> RedirectResponse:
+    await refresh_all_nodes(session)
+    return redirect_to_admin(request)
+
+
 @router.post("/admin/donations/poll")
 async def poll_donations_action(
     request: Request,
@@ -114,7 +141,8 @@ async def api_nodes(
     session: AsyncSession = Depends(get_session),
     _: None = Depends(require_admin_token),
 ) -> list[dict[str, object]]:
-    return [serialize_node(node) for node in await list_nodes(session)]
+    nodes = await list_nodes(session)
+    return [serialize_node(node, await local_key_counts(session, node.id)) for node in nodes]
 
 
 @router.get("/api/admin/subscriptions")
@@ -167,7 +195,7 @@ def redirect_to_admin(request: Request) -> RedirectResponse:
     return RedirectResponse(url=f"/admin{suffix}", status_code=303)
 
 
-def serialize_node(node: VpnNode) -> dict[str, object]:
+def serialize_node(node: VpnNode, counts: dict[str, int]) -> dict[str, object]:
     return {
         "id": node.id,
         "title": node.title,
@@ -178,6 +206,19 @@ def serialize_node(node: VpnNode) -> dict[str, object]:
         "public_host": node.public_host,
         "public_port": node.public_port,
         "is_active": node.is_active,
+        "status": node.status,
+        "last_checked_at": node.last_checked_at.isoformat() if node.last_checked_at else None,
+        "last_error": node.last_error,
+        "latency_ms": node.last_latency_ms,
+        "local_keys_total": counts["total"],
+        "local_keys_active": counts["active"],
+        "remote_clients": node.remote_clients,
+        "remote_enabled_clients": node.remote_enabled_clients,
+        "traffic_up_bytes": node.traffic_up_bytes,
+        "traffic_down_bytes": node.traffic_down_bytes,
+        "cpu_percent": node.cpu_percent,
+        "memory_percent": node.memory_percent,
+        "disk_percent": node.disk_percent,
     }
 
 
@@ -197,12 +238,15 @@ def serialize_subscription(subscription: Subscription, key: VpnKey | None) -> di
 def render_admin_page(
     stats: dict[str, int],
     nodes: list[VpnNode],
+    node_counts: dict[int, dict[str, int]],
     subscriptions: list[tuple[Subscription, VpnKey | None]],
     pending_orders: list[Order],
     token: str,
 ) -> str:
     token_qs = f"?{urlencode({'token': token})}" if token else ""
-    node_rows = "\n".join(render_node_row(node, token_qs) for node in nodes) or table_empty("Нод пока нет")
+    node_rows = "\n".join(render_node_row(node, node_counts.get(node.id, {}), token_qs) for node in nodes) or table_empty(
+        "Нод пока нет"
+    )
     sub_rows = "\n".join(render_subscription_row(subscription, key) for subscription, key in subscriptions) or table_empty(
         "Активных подписок пока нет"
     )
@@ -343,6 +387,14 @@ def render_admin_page(
         background: #dff7e8;
         color: #116b35;
       }}
+      .badge.offline {{
+        background: #ffe3e3;
+        color: #9f1d1d;
+      }}
+      .muted {{
+        color: #687385;
+        font-size: 12px;
+      }}
       code {{
         word-break: break-all;
       }}
@@ -363,16 +415,20 @@ def render_admin_page(
 
       <section class="panel">
         <h2>Ноды</h2>
+        <div class="actions" style="margin-bottom: 12px;">
+          <form method="post" action="/admin/nodes/refresh{token_qs}"><button type="submit">Обновить статус всех нод</button></form>
+        </div>
         <table>
           <thead>
             <tr>
               <th>ID</th>
               <th>Название</th>
-              <th>Режим</th>
               <th>3x-ui</th>
               <th>VLESS</th>
-              <th>Лимит</th>
               <th>Статус</th>
+              <th>Ключи</th>
+              <th>Трафик</th>
+              <th>Нагрузка</th>
               <th></th>
             </tr>
           </thead>
@@ -449,8 +505,24 @@ def render_stat(label: str, value: int) -> str:
     return f'<div class="stat"><span>{escape(label)}</span><strong>{value}</strong></div>'
 
 
-def render_node_row(node: VpnNode, token_qs: str) -> str:
+def render_node_row(node: VpnNode, counts: dict[str, int], token_qs: str) -> str:
     active = '<span class="badge active">active</span>' if node.is_active else '<span class="badge">off</span>'
+    status_class = "active" if node.status == "online" else "offline" if node.status == "offline" else ""
+    status = f'<span class="badge {status_class}">{escape(node.status)}</span>'
+    checked = node.last_checked_at.strftime("%d.%m %H:%M UTC") if node.last_checked_at else "еще не проверялась"
+    error = f'<br><span class="muted">{escape(node.last_error)}</span>' if node.last_error else ""
+    local_total = counts.get("total", 0)
+    local_active = counts.get("active", 0)
+    private_active = counts.get("private_active", 0)
+    public_active = counts.get("public_active", 0)
+    traffic = format_bytes(node.traffic_up_bytes + node.traffic_down_bytes)
+    load = "<br>".join(
+        [
+            f"CPU: {percent_text(node.cpu_percent)}",
+            f"RAM: {percent_text(node.memory_percent)}",
+            f"Disk: {percent_text(node.disk_percent)}",
+        ]
+    )
     action = (
         f'<form method="post" action="/admin/nodes/{node.id}/disable{token_qs}">'
         '<button class="danger" type="submit">Отключить</button></form>'
@@ -460,13 +532,23 @@ def render_node_row(node: VpnNode, token_qs: str) -> str:
     )
     return f"""<tr>
       <td>{node.id}</td>
-      <td>{escape(node.title)}</td>
-      <td><span class="badge">{escape(node.mode)}</span></td>
-      <td><code>{escape(node.base_url)}</code><br>inbound {node.inbound_id}</td>
+      <td>{escape(node.title)}<br><span class="badge">{escape(node.mode)}</span> {active}</td>
+      <td><code>{escape(node.base_url)}</code><br>inbound {node.inbound_id}<br><span class="muted">limit {node.max_clients}</span></td>
       <td><code>{escape(node.public_host)}:{node.public_port}</code></td>
-      <td>{node.max_clients}</td>
-      <td>{active}</td>
-      <td><div class="actions">{action}</div></td>
+      <td>{status}<br><span class="muted">{checked}</span>{error}<br><span class="muted">{node.last_latency_ms or 0} ms</span></td>
+      <td>
+        local: {local_active}/{local_total}<br>
+        private: {private_active}<br>
+        free: {public_active}<br>
+        3x-ui: {node.remote_enabled_clients}/{node.remote_clients}
+      </td>
+      <td>
+        total: {traffic}<br>
+        up: {format_bytes(node.traffic_up_bytes)}<br>
+        down: {format_bytes(node.traffic_down_bytes)}
+      </td>
+      <td>{load}</td>
+      <td><div class="actions">{action}<form method="post" action="/admin/nodes/{node.id}/refresh{token_qs}"><button class="secondary" type="submit">Статус</button></form></div></td>
     </tr>"""
 
 
@@ -499,3 +581,7 @@ def render_order_row(order: Order) -> str:
 
 def table_empty(text: str) -> str:
     return f'<tr><td colspan="8">{escape(text)}</td></tr>'
+
+
+def percent_text(value: int | None) -> str:
+    return f"{value}%" if value is not None else "n/a"

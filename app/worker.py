@@ -6,6 +6,7 @@ from aiogram import Bot
 from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.services.billing import poll_donations
+from app.services.node_monitor import refresh_all_nodes
 from app.services.public_keys import get_active_public_key, public_key_post_text, rotate_public_key
 from app.timeutils import utcnow
 
@@ -51,9 +52,22 @@ async def public_key_loop() -> None:
         await asyncio.sleep(300)
 
 
+async def node_status_loop() -> None:
+    settings = get_settings()
+    while True:
+        async with SessionLocal() as session:
+            try:
+                nodes = await refresh_all_nodes(session)
+                if nodes:
+                    logger.info("Refreshed VPN nodes: %s", len(nodes))
+            except Exception:
+                logger.exception("Node status polling failed")
+        await asyncio.sleep(settings.node_status_poll_interval_seconds)
+
+
 async def main() -> None:
     await init_db()
-    await asyncio.gather(donation_loop(), public_key_loop())
+    await asyncio.gather(donation_loop(), public_key_loop(), node_status_loop())
 
 
 if __name__ == "__main__":

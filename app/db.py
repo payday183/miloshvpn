@@ -22,10 +22,12 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 async def init_db() -> None:
     from app import models  # noqa: F401
+    from app.migrations import run_lightweight_migrations
     from app.services.seed import seed_defaults
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await run_lightweight_migrations(conn)
 
     async with SessionLocal() as session:
         await seed_defaults(session)

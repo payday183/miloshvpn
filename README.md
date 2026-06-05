@@ -84,9 +84,23 @@ The panel can:
 - activate or disable nodes;
 - show active subscriptions;
 - show the node used by each active VPN key;
+- show local keys created by the backend on each node;
+- show remote clients reported by 3x-ui;
+- show traffic up/down from 3x-ui inbounds;
+- show node latency, CPU, RAM and disk metrics when `/panel/api/server/status` returns them;
 - show pending DonationAlerts payments;
 - force DonationAlerts polling;
 - rotate the public free key.
+
+The bundled `x3ui` Docker service is seeded as the first node. Remote nodes work the same way: run 3x-ui on another server, expose its panel URL to the backend, then add it in `/admin`.
+
+Node monitoring uses official 3x-ui panel APIs:
+
+- `/login`;
+- `/panel/api/inbounds/list`;
+- `/panel/api/server/status`.
+
+The worker refreshes node status every `NODE_STATUS_POLL_INTERVAL_SECONDS`.
 
 ## Payments
 
@@ -146,6 +160,7 @@ The worker rotates the public key every 24 hours.
 PUBLIC_KEY_ENABLED=true
 PUBLIC_KEY_ROTATE_HOURS=24
 PUBLIC_KEY_CHAT_ID=
+NODE_STATUS_POLL_INTERVAL_SECONDS=60
 ```
 
 If `PUBLIC_KEY_CHAT_ID` is set, the worker posts the new free key into that Telegram chat/channel. The bot must be an admin in the target channel. The public post text includes the free VLESS key in a copyable block.

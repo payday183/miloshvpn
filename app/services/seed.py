@@ -63,6 +63,7 @@ async def seed_defaults(session: AsyncSession) -> None:
                 public_port=settings.vless_public_port,
                 vless_query=settings.vless_query,
                 is_active=True,
+                status="unknown",
                 created_at=now,
                 updated_at=now,
             )

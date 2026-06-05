@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     public_key_enabled: bool = True
     public_key_rotate_hours: int = 24
     public_key_chat_id: str = ""
+    node_status_poll_interval_seconds: int = 60
 
     @field_validator("admin_ids", mode="before")
     @classmethod

@@ -44,6 +44,7 @@ async def create_node(
         public_port=public_port,
         vless_query=vless_query.strip(),
         is_active=activate,
+        status="unknown",
         created_at=now,
         updated_at=now,
     )
