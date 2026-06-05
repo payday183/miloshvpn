@@ -61,7 +61,7 @@ Admin commands:
 /post_free
 ```
 
-If `ADMIN_IDS` is empty and `ALLOW_FIRST_ADMIN=true`, the first Telegram user who sends `/start` becomes admin.
+Admins are defined only by `ADMIN_IDS` in `.env`.
 
 ## Admin Panel
 

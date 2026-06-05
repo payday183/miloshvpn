@@ -1,4 +1,4 @@
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -22,8 +22,7 @@ async def get_or_create_user(
 
     role = "user"
     settings = get_settings()
-    admin_count = await session.scalar(select(func.count()).select_from(BotAdmin))
-    if telegram_id in settings.admin_ids or (settings.allow_first_admin and admin_count == 0):
+    if telegram_id in settings.admin_ids:
         role = "admin"
 
     user = User(
