@@ -91,6 +91,7 @@ The panel can:
 - show pending DonationAlerts payments;
 - force DonationAlerts polling;
 - rotate the public free key.
+- manually clean expired subscriptions.
 
 The bundled `x3ui` Docker service is seeded as the first node. Remote nodes work the same way: run 3x-ui on another server, expose its panel URL to the backend, then add it in `/admin`.
 
@@ -108,6 +109,8 @@ Plans:
 
 - `75 RUB` - cheap plan for 30 days, 50 GB;
 - `95 RUB` - unlimited plan for 30 days.
+
+Every paid plan is issued for one month (`30` days). Renewing an active subscription adds another 30 days to the current expiry date.
 
 Payment matching works without webhooks:
 
@@ -161,9 +164,13 @@ PUBLIC_KEY_ENABLED=true
 PUBLIC_KEY_ROTATE_HOURS=24
 PUBLIC_KEY_CHAT_ID=
 NODE_STATUS_POLL_INTERVAL_SECONDS=60
+EXPIRED_SUBSCRIPTION_CLEANUP_ENABLED=true
+EXPIRED_SUBSCRIPTION_CLEANUP_INTERVAL_SECONDS=300
 ```
 
 If `PUBLIC_KEY_CHAT_ID` is set, the worker posts the new free key into that Telegram chat/channel. The bot must be an admin in the target channel. The public post text includes the free VLESS key in a copyable block.
+
+Expired paid subscriptions are cleaned automatically. The worker marks them as expired, deletes the private VPN client from 3x-ui, and keeps the Telegram user/payment history in PostgreSQL.
 
 ## Production
 

@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.db import get_session
 from app.models import Order, Subscription, VpnKey, VpnNode
 from app.services.billing import poll_donations
+from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
 from app.services.node_monitor import format_bytes, local_key_counts, refresh_all_nodes, refresh_node_status
 from app.services.nodes import activate_node, create_node, disable_node, list_nodes
 from app.services.public_keys import rotate_public_key
@@ -133,6 +134,17 @@ async def rotate_public_key_action(
     _: None = Depends(require_admin_token),
 ) -> RedirectResponse:
     await rotate_public_key(session)
+    return redirect_to_admin(request)
+
+
+@router.post("/admin/subscriptions/cleanup-expired")
+async def cleanup_expired_subscriptions_action(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> RedirectResponse:
+    await expire_subscriptions(session)
+    await retry_expired_key_revokes(session)
     return redirect_to_admin(request)
 
 
@@ -481,6 +493,7 @@ def render_admin_page(
         <div class="actions" style="margin-bottom: 12px;">
           <form method="post" action="/admin/donations/poll{token_qs}"><button type="submit">Проверить DonationAlerts</button></form>
           <form method="post" action="/admin/public-key/rotate{token_qs}"><button class="secondary" type="submit">Пересоздать free key</button></form>
+          <form method="post" action="/admin/subscriptions/cleanup-expired{token_qs}"><button class="secondary" type="submit">Очистить истёкшие</button></form>
         </div>
         <table>
           <thead>

@@ -6,6 +6,7 @@ from aiogram import Bot
 from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.services.billing import poll_donations
+from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
 from app.services.node_monitor import refresh_all_nodes
 from app.services.public_keys import get_active_public_key, public_key_post_text, rotate_public_key
 from app.timeutils import utcnow
@@ -65,9 +66,36 @@ async def node_status_loop() -> None:
         await asyncio.sleep(settings.node_status_poll_interval_seconds)
 
 
+async def expired_subscription_loop() -> None:
+    settings = get_settings()
+    while True:
+        if settings.expired_subscription_cleanup_enabled:
+            async with SessionLocal() as session:
+                try:
+                    expired = await expire_subscriptions(session)
+                    retry = await retry_expired_key_revokes(session)
+                    total_revoked = expired["revoked_keys"] + retry["revoked_keys"]
+                    total_failed = expired["failed_revokes"] + retry["failed_revokes"]
+                    if expired["expired_subscriptions"] or total_revoked or total_failed:
+                        logger.info(
+                            "Expired subscriptions cleanup: expired=%s revoked=%s failed=%s",
+                            expired["expired_subscriptions"],
+                            total_revoked,
+                            total_failed,
+                        )
+                except Exception:
+                    logger.exception("Expired subscriptions cleanup failed")
+        await asyncio.sleep(settings.expired_subscription_cleanup_interval_seconds)
+
+
 async def main() -> None:
     await init_db()
-    await asyncio.gather(donation_loop(), public_key_loop(), node_status_loop())
+    await asyncio.gather(
+        donation_loop(),
+        public_key_loop(),
+        node_status_loop(),
+        expired_subscription_loop(),
+    )
 
 
 if __name__ == "__main__":
