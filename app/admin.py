@@ -9,7 +9,12 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.db import get_session
-from app.models import Order, Subscription, VpnKey, VpnNode
+from app.models import BotAdmin, Order, Subscription, User, VpnKey, VpnNode
+from app.services.admin_auth import (
+    admin_panel_url_with_token,
+    verify_admin_profile_signature,
+    verify_telegram_login,
+)
 from app.services.billing import poll_donations
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
 from app.services.node_monitor import format_bytes, local_key_counts, refresh_all_nodes, refresh_node_status
@@ -29,6 +34,38 @@ async def require_admin_token(request: Request) -> None:
     token = request.query_params.get("token") or request.headers.get("X-Admin-Token")
     if token != settings.admin_web_token:
         raise HTTPException(status_code=403, detail="Admin token required")
+
+
+@router.get("/admin/profile", response_class=HTMLResponse)
+async def admin_profile(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse:
+    telegram_id = verify_admin_profile_signature(request.query_params)
+    if telegram_id is None:
+        return HTMLResponse(render_admin_profile_login_page(request))
+
+    user = await get_admin_user(session, telegram_id)
+    if user is None and not await is_admin_telegram_id(session, telegram_id):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    return HTMLResponse(render_admin_profile_page(telegram_id, user, auth_source="Telegram bot"))
+
+
+@router.get("/admin/profile/login", response_class=HTMLResponse)
+async def admin_profile_login(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse:
+    telegram_id = verify_telegram_login(request.query_params)
+    if telegram_id is None:
+        return HTMLResponse(render_admin_profile_login_page(request, error="Не удалось проверить вход через Telegram."))
+
+    user = await get_admin_user(session, telegram_id)
+    if user is None and not await is_admin_telegram_id(session, telegram_id):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    return HTMLResponse(render_admin_profile_page(telegram_id, user, auth_source="Telegram Login"))
 
 
 @router.get("/admin", response_class=HTMLResponse)
@@ -166,6 +203,20 @@ async def api_subscriptions(
     return [serialize_subscription(subscription, key) for subscription, key in rows]
 
 
+async def get_admin_user(session: AsyncSession, telegram_id: int) -> User | None:
+    if not await is_admin_telegram_id(session, telegram_id):
+        return None
+    return await session.scalar(select(User).where(User.telegram_id == telegram_id))
+
+
+async def is_admin_telegram_id(session: AsyncSession, telegram_id: int) -> bool:
+    settings = get_settings()
+    if telegram_id in settings.admin_ids:
+        return True
+    admin = await session.scalar(select(BotAdmin).where(BotAdmin.telegram_id == telegram_id))
+    return admin is not None
+
+
 async def active_subscriptions(session: AsyncSession) -> list[tuple[Subscription, VpnKey | None]]:
     subscriptions = (
         await session.scalars(
@@ -245,6 +296,168 @@ def serialize_subscription(subscription: Subscription, key: VpnKey | None) -> di
         "node": key.node.title if key and key.node else None,
         "key_active": key.active if key else False,
     }
+
+
+def render_admin_profile_login_page(request: Request, error: str | None = None) -> str:
+    settings = get_settings()
+    bot_username = settings.bot_username.strip().lstrip("@")
+    auth_url = escape(str(request.url_for("admin_profile_login")))
+    error_html = f'<p class="error">{escape(error)}</p>' if error else ""
+    if bot_username:
+        login = (
+            f'<script async src="https://telegram.org/js/telegram-widget.js?22" '
+            f'data-telegram-login="{escape(bot_username)}" '
+            'data-size="large" '
+            f'data-auth-url="{auth_url}" '
+            'data-request-access="write"></script>'
+        )
+    else:
+        login = '<p class="muted">BOT_USERNAME не задан. Открой профиль через кнопку в Telegram-боте.</p>'
+
+    return f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MiloshVPN Admin Profile</title>
+    <style>{profile_page_css()}</style>
+  </head>
+  <body>
+    <main class="profile-shell">
+      <section class="profile-panel">
+        <p class="eyebrow">MiloshVPN</p>
+        <h1>Вход администратора</h1>
+        {error_html}
+        <div class="login-box">{login}</div>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def render_admin_profile_page(telegram_id: int, user: User | None, *, auth_source: str) -> str:
+    username = f"@{escape(user.username)}" if user and user.username else "не указан"
+    first_name = escape(user.first_name) if user and user.first_name else "не указано"
+    role = escape(user.role) if user else "admin"
+    panel_url = escape(admin_panel_url_with_token())
+    return f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>MiloshVPN Admin Profile</title>
+    <style>{profile_page_css()}</style>
+  </head>
+  <body>
+    <main class="profile-shell">
+      <section class="profile-panel">
+        <p class="eyebrow">MiloshVPN</p>
+        <h1>Профиль администратора</h1>
+        <dl>
+          <div><dt>Telegram ID</dt><dd><code>{telegram_id}</code></dd></div>
+          <div><dt>Username</dt><dd>{username}</dd></div>
+          <div><dt>Имя</dt><dd>{first_name}</dd></div>
+          <div><dt>Роль</dt><dd>{role}</dd></div>
+          <div><dt>Вход</dt><dd>{escape(auth_source)}</dd></div>
+        </dl>
+        <a class="button" href="{panel_url}">Открыть админку</a>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def profile_page_css() -> str:
+    return """
+      :root {
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #15191f;
+        background: #eef2f6;
+      }
+      body {
+        margin: 0;
+      }
+      .profile-shell {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+      .profile-panel {
+        width: min(100%, 460px);
+        background: #fff;
+        border: 1px solid #dbe2ea;
+        border-radius: 8px;
+        padding: 24px;
+        box-shadow: 0 16px 44px rgba(20, 28, 38, 0.09);
+      }
+      .eyebrow {
+        margin: 0 0 8px;
+        color: #576273;
+        font-size: 13px;
+      }
+      h1 {
+        margin: 0 0 20px;
+        font-size: 24px;
+        letter-spacing: 0;
+      }
+      dl {
+        display: grid;
+        gap: 12px;
+        margin: 0 0 22px;
+      }
+      dl div {
+        display: grid;
+        grid-template-columns: 120px 1fr;
+        gap: 12px;
+        align-items: baseline;
+      }
+      dt {
+        color: #657186;
+        font-size: 13px;
+      }
+      dd {
+        margin: 0;
+        min-width: 0;
+        word-break: break-word;
+      }
+      code {
+        word-break: break-all;
+      }
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 40px;
+        padding: 0 14px;
+        border-radius: 6px;
+        background: #1563ff;
+        color: #fff;
+        text-decoration: none;
+      }
+      .login-box {
+        min-height: 48px;
+        display: flex;
+        align-items: center;
+      }
+      .muted {
+        margin: 0;
+        color: #657186;
+      }
+      .error {
+        margin: 0 0 16px;
+        color: #a51d2d;
+      }
+      @media (max-width: 520px) {
+        .profile-panel {
+          padding: 18px;
+        }
+        dl div {
+          grid-template-columns: 1fr;
+          gap: 4px;
+        }
+      }
+    """
 
 
 def render_admin_page(

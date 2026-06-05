@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.models import Order, Plan
+from app.services.admin_auth import build_admin_profile_url
 from app.services.billing import create_order, poll_donations
 from app.services.public_keys import get_active_public_key, public_key_post_text, rotate_public_key
 from app.services.stats import collect_stats
@@ -53,6 +54,14 @@ async def start(message: Message) -> None:
 @router.message(F.text == kb.PROFILE)
 async def profile(message: Message) -> None:
     user, admin = await current_user(message)
+    if admin:
+        profile_url = build_admin_profile_url(user.telegram_id)
+        await message.answer(
+            "Профиль администратора\n\nОткрой страницу профиля через Telegram.",
+            reply_markup=kb.admin_profile_keyboard(profile_url),
+        )
+        return
+
     await message.answer(profile_text(user), reply_markup=kb.main_keyboard(admin), parse_mode=ParseMode.HTML)
 
 

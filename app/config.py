@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
 
     bot_token: str = ""
+    bot_username: str = ""
     admin_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
     admin_web_token: str = ""
     admin_panel_url: str = "http://localhost:8081/admin"

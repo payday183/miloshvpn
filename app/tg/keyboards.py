@@ -53,3 +53,11 @@ def check_payment_keyboard(order_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Купить другой тариф", callback_data="show_plans")],
         ]
     )
+
+
+def admin_profile_keyboard(url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Открыть профиль", url=url)],
+        ]
+    )
