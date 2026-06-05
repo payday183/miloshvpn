@@ -1,9 +1,19 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "3"
+
 services:
   api:
     build:
       context: .
     image: miloshvpn-api:local
     restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 384m
+    pids_limit: 64
+    logging: *default-logging
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     env_file:
       - .env
@@ -28,6 +38,10 @@ services:
   bot:
     image: miloshvpn-api:local
     restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 384m
+    pids_limit: 64
+    logging: *default-logging
     command: python -m app.bot
     env_file:
       - .env
@@ -42,6 +56,10 @@ services:
   worker:
     image: miloshvpn-api:local
     restart: unless-stopped
+    mem_limit: 320m
+    memswap_limit: 512m
+    pids_limit: 64
+    logging: *default-logging
     command: python -m app.worker
     env_file:
       - .env
@@ -52,10 +70,16 @@ services:
     depends_on:
       api:
         condition: service_healthy
+      x3ui:
+        condition: service_healthy
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 192m
+    pids_limit: 64
+    logging: *default-logging
     volumes:
       - redis-data:/data
     healthcheck:
@@ -67,6 +91,10 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 768m
+    pids_limit: 128
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-milosh}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-milosh_password}
@@ -82,6 +110,10 @@ services:
   x3ui:
     image: ghcr.io/mhsanaei/3x-ui:latest
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 768m
+    pids_limit: 128
+    logging: *default-logging
     tty: true
     security_opt:
       - no-new-privileges:true
@@ -96,6 +128,12 @@ services:
     ports:
       - "${X3UI_PANEL_PORT:-2053}:2053"
       - "${X3UI_VLESS_PORT:-8443}:8443"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:2053/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
 volumes:
   postgres-data:

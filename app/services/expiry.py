@@ -31,7 +31,7 @@ async def expire_subscriptions(session: AsyncSession, *, limit: int = 200) -> di
             if not key.active:
                 continue
             try:
-                await X3UIClient(node=key.node).revoke_client(client_uuid=key.x3ui_client_uuid)
+                await X3UIClient(node=key.node).revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
             except Exception:
                 # Keep the key active so the next cleanup pass retries the 3x-ui deletion.
                 failed_revokes += 1
@@ -72,7 +72,7 @@ async def retry_expired_key_revokes(session: AsyncSession, *, limit: int = 200) 
             key.subscription.status = "expired"
 
         try:
-            await X3UIClient(node=key.node).revoke_client(client_uuid=key.x3ui_client_uuid)
+            await X3UIClient(node=key.node).revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
         except Exception:
             failed_revokes += 1
             continue

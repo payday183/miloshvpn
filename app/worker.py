@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from aiogram import Bot
+import httpx
 
 from app.config import get_settings
 from app.db import SessionLocal, init_db
@@ -13,19 +14,33 @@ from app.timeutils import utcnow
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+DONATION_AUTH_RETRY_SECONDS = 15 * 60
 
 
 async def donation_loop() -> None:
     settings = get_settings()
     while True:
+        sleep_seconds = settings.donationalerts_poll_interval_seconds
         async with SessionLocal() as session:
             try:
                 processed = await poll_donations(session)
                 if processed:
                     logger.info("Processed donations: %s", processed)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {401, 403}:
+                    sleep_seconds = max(sleep_seconds, DONATION_AUTH_RETRY_SECONDS)
+                    logger.warning(
+                        "DonationAlerts auth failed with %s; retrying in %s seconds",
+                        exc.response.status_code,
+                        sleep_seconds,
+                    )
+                else:
+                    logger.exception("Donation polling failed")
             except Exception:
                 logger.exception("Donation polling failed")
-        await asyncio.sleep(settings.donationalerts_poll_interval_seconds)
+        await asyncio.sleep(sleep_seconds)
 
 
 async def public_key_loop() -> None:

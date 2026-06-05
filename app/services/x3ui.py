@@ -4,6 +4,7 @@ from decimal import Decimal
 import json
 import time
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 import httpx
@@ -70,7 +71,7 @@ class X3UIClient:
 
         expiry_ms = int(expires_at.timestamp() * 1000) if expires_at else 0
         total_gb = int(Decimal(traffic_gb or 0) * Decimal(1024**3))
-        payload = {
+        legacy_payload = {
             "id": self.target.inbound_id,
             "settings": json.dumps({
                 "clients": [
@@ -89,23 +90,50 @@ class X3UIClient:
 
         async with self._client() as client:
             await self._login(client)
-            response = await client.post("/panel/api/inbounds/addClient", json=payload)
-            self._raise_for_x3ui(response)
+            response = await client.post(
+                "/panel/api/clients/add",
+                json={
+                    "client": {
+                        "email": email,
+                        "uuid": client_uuid,
+                        "subId": client_uuid.replace("-", "")[:16],
+                        "totalGB": total_gb,
+                        "expiryTime": expiry_ms,
+                        "tgId": telegram_id or 0,
+                        "limitIp": 0,
+                        "enable": True,
+                    },
+                    "inboundIds": [self.target.inbound_id],
+                },
+            )
+            if response.status_code == 404:
+                response = await client.post("/panel/api/inbounds/addClient", json=legacy_payload)
+                self._raise_for_x3ui(response)
+            else:
+                self._raise_for_x3ui(response)
+                client_uuid = await self._client_uuid_by_email(client, email) or client_uuid
 
+        vless_uri = self.build_vless_uri(client_uuid=client_uuid, label=email)
         return ProvisionedClient(client_uuid=client_uuid, email=email, vless_uri=vless_uri)
 
-    async def revoke_client(self, *, client_uuid: str) -> None:
+    async def revoke_client(self, *, client_uuid: str, email: str | None = None) -> None:
         if self.target.mode == "mock":
             return
 
         async with self._client() as client:
             await self._login(client)
-            response = await client.post(
-                f"/panel/api/inbounds/{self.target.inbound_id}/delClient/{client_uuid}"
-            )
-            if response.status_code == 404:
-                return
-            self._raise_for_x3ui(response)
+            if email:
+                response = await client.post(
+                    f"/panel/api/clients/del/{quote(email, safe='')}",
+                    params={"keepTraffic": 0},
+                )
+                if response.status_code != 404:
+                    self._raise_for_x3ui(response)
+                    return
+
+            response = await client.post(f"/panel/api/inbounds/{self.target.inbound_id}/delClient/{client_uuid}")
+            if response.status_code != 404:
+                self._raise_for_x3ui(response)
 
     async def collect_snapshot(self) -> NodeSnapshot:
         if self.target.mode == "mock":
@@ -158,11 +186,48 @@ class X3UIClient:
         return httpx.AsyncClient(base_url=self.target.base_url, timeout=20.0, follow_redirects=True)
 
     async def _login(self, client: httpx.AsyncClient) -> None:
+        csrf_token = await self._csrf_token(client)
+        client.headers["X-Requested-With"] = "XMLHttpRequest"
+        if csrf_token:
+            client.headers["X-CSRF-Token"] = csrf_token
+
         response = await client.post(
             "/login",
-            data={"username": self.target.username, "password": self.target.password},
+            data={
+                "username": self.target.username,
+                "password": self.target.password,
+                "twoFactorCode": "",
+            },
         )
         self._raise_for_x3ui(response)
+
+    @staticmethod
+    async def _csrf_token(client: httpx.AsyncClient) -> str | None:
+        response = await client.get("/csrf-token", headers={"X-Requested-With": "XMLHttpRequest"})
+        if response.status_code >= 400:
+            return None
+
+        content_type = response.headers.get("content-type", "")
+        if "application/json" not in content_type:
+            return None
+
+        payload = response.json()
+        token = payload.get("obj") if isinstance(payload, dict) and payload.get("success") is True else None
+        return token if isinstance(token, str) and token else None
+
+    async def _client_uuid_by_email(self, client: httpx.AsyncClient, email: str) -> str | None:
+        response = await client.get(f"/panel/api/clients/get/{quote(email, safe='')}")
+        if response.status_code == 404:
+            return None
+
+        self._raise_for_x3ui(response)
+        payload = self._payload_data(response)
+        if isinstance(payload, dict):
+            client_payload = payload.get("client") if isinstance(payload.get("client"), dict) else payload
+            uuid = client_payload.get("uuid")
+            if isinstance(uuid, str) and uuid:
+                return uuid
+        return None
 
     def _target_from_node(self, node: VpnNode | None) -> X3UITarget:
         if node is not None:
@@ -300,11 +365,11 @@ class X3UIClient:
                 numeric *= 100
             return max(0, min(100, int(numeric)))
         if isinstance(value, dict):
-            for key in ("percent", "usage", "usedPercent", "current"):
-                if key in value:
-                    return cls._extract_percent(value[key])
-            used = value.get("used")
+            used = value.get("used", value.get("current"))
             total = value.get("total")
             if used is not None and total:
                 return max(0, min(100, int((float(used) / float(total)) * 100)))
+            for key in ("percent", "usage", "usedPercent"):
+                if key in value:
+                    return cls._extract_percent(value[key])
         return None

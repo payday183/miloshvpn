@@ -63,7 +63,7 @@ async def revoke_user_private_keys(session: AsyncSession, user_id: int) -> None:
     now = utcnow()
     for key in keys:
         x3ui = X3UIClient(node=key.node)
-        await x3ui.revoke_client(client_uuid=key.x3ui_client_uuid)
+        await x3ui.revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
         key.active = False
         key.revoked_at = now
 

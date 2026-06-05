@@ -39,7 +39,7 @@ async def rotate_public_key(session: AsyncSession) -> VpnKey:
     ).all()
     for key in keys:
         x3ui = X3UIClient(settings, node=key.node)
-        await x3ui.revoke_client(client_uuid=key.x3ui_client_uuid)
+        await x3ui.revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
         key.active = False
         key.revoked_at = now
 
