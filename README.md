@@ -1,78 +1,171 @@
 # miloshvpn
 
-Minimal Docker and git auto-deploy setup.
+Telegram-first VPN service without a domain.
 
-## Run locally
+Stack:
+
+- FastAPI control center;
+- Telegram bot frontend with long polling;
+- PostgreSQL for users, orders, subscriptions and keys;
+- Redis for cache/runtime state;
+- DonationAlerts polling, no webhooks;
+- test 3x-ui container for VLESS key provisioning.
+
+## Development
+
+```sh
+./scripts/dev.sh up
+./scripts/dev.sh logs
+./scripts/dev.sh ps
+```
+
+Check code and Compose config:
+
+```sh
+./scripts/check.sh
+```
+
+Dev API:
+
+```text
+http://localhost:8081
+```
+
+Dev 3x-ui panel port:
+
+```text
+http://localhost:2054
+```
+
+The bot runs in polling mode, so a domain is not required.
+
+If Docker Desktop is installed on Windows, enable WSL integration for this distro before running Compose.
+
+## Telegram Bot
+
+Main buttons:
+
+- `Профиль`
+- `Моя подписка`
+- `Купить пакет`
+- `Продлить`
+- `Бесплатный ключ`
+- `Инструкция`
+- `Админка` for admins
+
+Admin commands:
+
+```text
+/add_admin TELEGRAM_ID
+/rotate_free
+/post_free
+```
+
+If `ADMIN_IDS` is empty and `ALLOW_FIRST_ADMIN=true`, the first Telegram user who sends `/start` becomes admin.
+
+## Payments
+
+Plans:
+
+- `75 RUB` - cheap plan for 30 days, 50 GB;
+- `95 RUB` - unlimited plan for 30 days.
+
+Payment matching works without webhooks:
+
+1. User clicks `Купить пакет`.
+2. Bot creates a pending order with a unique code like `MILO-123456-ABCDEF`.
+3. User sends a DonationAlerts donation and puts that code into the donation message.
+4. Worker polls `GET /api/v1/alerts/donations`.
+5. Backend finds the code, checks amount/currency and activates the subscription for that Telegram user.
+
+Set these in `.env`:
+
+```env
+DONATIONALERTS_TOKEN=
+DONATIONALERTS_DONATE_URL=
+```
+
+## 3x-ui
+
+By default the app uses:
+
+```env
+X3UI_MODE=mock
+```
+
+Mock mode generates VLESS links and lets the business flow work before real 3x-ui is configured.
+
+For live 3x-ui:
+
+```env
+X3UI_MODE=live
+X3UI_USERNAME=admin
+X3UI_PASSWORD=admin
+X3UI_INBOUND_ID=1
+VLESS_PUBLIC_HOST=your-server-ip
+VLESS_PUBLIC_PORT=8443
+VLESS_QUERY=type=tcp&security=none
+```
+
+The test limit is controlled by:
+
+```env
+X3UI_MAX_CLIENTS=10
+```
+
+## Public Free Key
+
+The worker rotates the public key every 24 hours.
+
+```env
+PUBLIC_KEY_ENABLED=true
+PUBLIC_KEY_ROTATE_HOURS=24
+PUBLIC_KEY_CHAT_ID=
+```
+
+If `PUBLIC_KEY_CHAT_ID` is set, the worker posts the new free key into that Telegram chat/channel. The bot must be an admin in the target channel. The public post text includes the free VLESS key in a copyable block.
+
+## Production
 
 ```sh
 cp .env.example .env
 docker compose up -d --build
 ```
 
-Open `http://localhost:8080`.
+Production API:
 
-## Development
-
-Work in the `dev` branch:
-
-```sh
-git switch dev
-./scripts/dev.sh up
+```text
+http://localhost:8080
 ```
 
-Open `http://localhost:8081`.
+## GitHub
 
-Useful commands:
+Current branches:
 
-```sh
-./scripts/dev.sh ps
-./scripts/dev.sh logs
-./scripts/dev.sh restart
-./scripts/dev.sh down
-```
+- `main` - deploy branch;
+- `dev` - development branch;
+- `backup-old-github-main` - backup of previous GitHub contents.
 
-The dev container mounts `public/` and `nginx.conf`, so changes there are visible without rebuilding.
-
-## Configure git remote
+Development flow:
 
 ```sh
-git remote add origin <your-git-url>
-git push -u origin main
+git add .
+git commit -m "Describe changes"
+git push
 ```
 
-## Manual deploy
+The local `dev` branch tracks `origin/dev`, so `git push` is enough during development.
 
-```sh
-./scripts/auto-deploy.sh
-```
-
-The deploy script:
-
-- fetches `origin/main` or the branch from `DEPLOY_BRANCH`;
-- refuses to run when local uncommitted changes exist;
-- skips when the current branch is not the deploy branch;
-- updates only with a fast-forward merge;
-- rebuilds and restarts Docker Compose.
-
-It does not remove orphan containers automatically.
-
-## Automatic deploy
-
-Install the per-user systemd timer:
+## Auto Deploy
 
 ```sh
 ./scripts/install-auto-deploy-user.sh
 ```
 
-Useful commands:
+The timer pulls `origin/main` and runs:
 
 ```sh
-systemctl --user status miloshvpn-auto-deploy.timer
-journalctl --user -u miloshvpn-auto-deploy.service -f
+docker compose up -d --build
 ```
 
-The timer runs every minute. If `origin` is not configured yet, it exits without changing anything.
-
-## Git hook
-
-This repository uses `deploy/git-hooks` as `core.hooksPath`. After a successful `git pull` on the deploy branch, the `post-merge` hook rebuilds the Docker Compose service.
+It skips auto-deploy when the working copy is on `dev`.

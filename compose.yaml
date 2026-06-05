@@ -1,15 +1,100 @@
 services:
-  app:
+  api:
     build:
       context: .
-    image: miloshvpn:local
-    container_name: miloshvpn
+    image: miloshvpn-api:local
     restart: unless-stopped
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-milosh}:${POSTGRES_PASSWORD:-milosh_password}@postgres:5432/${POSTGRES_DB:-miloshvpn}
+      REDIS_URL: redis://redis:6379/0
+      X3UI_BASE_URL: http://x3ui:2053
     ports:
-      - "${APP_PORT:-8080}:80"
+      - "${APP_PORT:-8080}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health >/dev/null || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()\""]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
+
+  bot:
+    image: miloshvpn-api:local
+    restart: unless-stopped
+    command: python -m app.bot
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-milosh}:${POSTGRES_PASSWORD:-milosh_password}@postgres:5432/${POSTGRES_DB:-miloshvpn}
+      REDIS_URL: redis://redis:6379/0
+      X3UI_BASE_URL: http://x3ui:2053
+    depends_on:
+      api:
+        condition: service_healthy
+
+  worker:
+    image: miloshvpn-api:local
+    restart: unless-stopped
+    command: python -m app.worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-milosh}:${POSTGRES_PASSWORD:-milosh_password}@postgres:5432/${POSTGRES_DB:-miloshvpn}
+      REDIS_URL: redis://redis:6379/0
+      X3UI_BASE_URL: http://x3ui:2053
+    depends_on:
+      api:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-milosh}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-milosh_password}
+      POSTGRES_DB: ${POSTGRES_DB:-miloshvpn}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-milosh} -d ${POSTGRES_DB:-miloshvpn}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  x3ui:
+    image: ghcr.io/mhsanaei/3x-ui:latest
+    restart: unless-stopped
+    tty: true
+    environment:
+      XRAY_VMESS_AEAD_FORCED: "false"
+      XUI_ENABLE_FAIL2BAN: "true"
+    volumes:
+      - x3ui-db:/etc/x-ui/
+      - x3ui-cert:/root/cert/
+    ports:
+      - "${X3UI_PANEL_PORT:-2053}:2053"
+      - "${X3UI_VLESS_PORT:-8443}:8443"
+
+volumes:
+  postgres-data:
+  redis-data:
+  x3ui-db:
+  x3ui-cert:
