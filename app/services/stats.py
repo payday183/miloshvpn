@@ -19,7 +19,9 @@ async def collect_stats(session: AsyncSession) -> dict[str, int]:
         .where(Subscription.status == "active", Subscription.expires_at > now)
     )
     paid_orders = await session.scalar(select(func.count()).select_from(Order).where(Order.status == "paid"))
-    pending_orders = await session.scalar(select(func.count()).select_from(Order).where(Order.status == "pending"))
+    pending_orders = await session.scalar(
+        select(func.count()).select_from(Order).where(Order.status == "pending", Order.expires_at > now)
+    )
     active_keys = await session.scalar(select(func.count()).select_from(VpnKey).where(VpnKey.active.is_(True)))
     stats = {
         "users": int(users or 0),

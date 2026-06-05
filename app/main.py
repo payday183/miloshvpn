@@ -10,6 +10,7 @@ from app.services.billing import poll_donations
 from app.services.public_keys import get_active_public_key, rotate_public_key
 from app.services.stats import collect_stats
 from app.services.vpn import get_active_key, get_active_subscription
+from app.timeutils import utcnow
 
 app = FastAPI(title="MiloshVPN Control Center")
 app.include_router(admin_router)
@@ -58,7 +59,9 @@ async def user_profile(telegram_id: int, session: AsyncSession = Depends(get_ses
     subscription = await get_active_subscription(session, user.id)
     key = await get_active_key(session, user.id)
     pending_order = await session.scalar(
-        select(Order).where(Order.user_id == user.id, Order.status == "pending").order_by(Order.created_at.desc())
+        select(Order)
+        .where(Order.user_id == user.id, Order.status == "pending", Order.expires_at > utcnow())
+        .order_by(Order.created_at.desc())
     )
     return {
         "telegram_id": user.telegram_id,

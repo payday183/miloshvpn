@@ -139,12 +139,18 @@ Payment matching works without webhooks:
 4. Worker polls `GET /api/v1/alerts/donations`.
 5. Backend finds the code, checks amount/currency and activates the subscription for that Telegram user.
 
+Repeated clicks on the same plan reuse the user's active pending order instead of creating duplicate unpaid orders. If the user switches to another plan, older active pending orders are expired.
+
 Set these in `.env`:
 
 ```env
 DONATIONALERTS_TOKEN=
 DONATIONALERTS_DONATE_URL=
+DONATIONALERTS_FETCH_LIMIT=50
+DONATIONALERTS_FETCH_PAGES=3
 ```
+
+DonationAlerts responses are paginated. The backend fetches up to `DONATIONALERTS_FETCH_PAGES` pages with `DONATIONALERTS_FETCH_LIMIT` items each, using a short delay between pages to stay under the API rate limit.
 
 ## 3x-ui
 

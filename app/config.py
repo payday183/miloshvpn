@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     donationalerts_token: str = ""
     donationalerts_donate_url: str = ""
     donationalerts_poll_interval_seconds: int = 45
+    donationalerts_fetch_limit: int = 50
+    donationalerts_fetch_pages: int = 3
 
     x3ui_mode: Literal["mock", "live"] = "mock"
     x3ui_base_url: str = "http://x3ui:2053"

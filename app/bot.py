@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
+import httpx
 from sqlalchemy import func, select
 
 from app.config import get_settings
@@ -27,6 +28,7 @@ from app.tg.texts import (
     start_text,
     subscription_text,
 )
+from app.timeutils import utcnow
 
 logging.basicConfig(level=logging.INFO)
 router = Router()
@@ -118,17 +120,23 @@ async def buy_plan(callback: CallbackQuery) -> None:
 async def check_payment(callback: CallbackQuery) -> None:
     order_id = int(callback.data.split(":", 1)[1])
     async with SessionLocal() as session:
-        await poll_donations(session)
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        await session.commit()
+        try:
+            await poll_donations(session)
+        except httpx.HTTPStatusError as exc:
+            logging.warning("DonationAlerts check failed with %s", exc.response.status_code)
         order = await session.get(Order, order_id)
         if order is None:
             await callback.message.answer("Заказ не найден.")
+        elif order.user_id != user.id:
+            await callback.message.answer("Этот заказ привязан к другому Telegram ID.")
         elif order.status == "paid":
-            user = await get_or_create_user(
-                session,
-                telegram_id=callback.from_user.id,
-                username=callback.from_user.username,
-                first_name=callback.from_user.first_name,
-            )
             subscription_obj = await get_active_subscription(session, user.id)
             key = await get_active_key(session, user.id)
             await callback.message.answer(subscription_text(subscription_obj, key), parse_mode=ParseMode.HTML)
@@ -190,7 +198,9 @@ async def pending_orders(message: Message) -> None:
     if not admin:
         return
     async with SessionLocal() as session:
-        count = await session.scalar(select(func.count()).select_from(Order).where(Order.status == "pending"))
+        count = await session.scalar(
+            select(func.count()).select_from(Order).where(Order.status == "pending", Order.expires_at > utcnow())
+        )
     await message.answer(f"Ожидающих оплат: {int(count or 0)}", reply_markup=kb.admin_keyboard())
 
 
