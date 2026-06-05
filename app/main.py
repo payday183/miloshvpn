@@ -6,6 +6,7 @@ from app.admin import router as admin_router
 from app.cache import ping as redis_ping
 from app.db import get_session, init_db
 from app.models import Order, User
+from app.payments import router as payments_router
 from app.services.billing import poll_donations
 from app.services.public_keys import get_active_public_key, rotate_public_key
 from app.services.stats import collect_stats
@@ -14,6 +15,7 @@ from app.timeutils import utcnow
 
 app = FastAPI(title="MiloshVPN Control Center")
 app.include_router(admin_router)
+app.include_router(payments_router)
 
 
 @app.on_event("startup")

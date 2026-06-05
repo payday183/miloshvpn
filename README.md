@@ -57,6 +57,7 @@ Admin commands:
 
 ```text
 /add_admin TELEGRAM_ID
+/admin_key
 /rotate_free
 /post_free
 ```
@@ -90,7 +91,8 @@ The panel can:
 - show node latency, CPU, RAM and disk metrics when `/panel/api/server/status` returns them;
 - show pending DonationAlerts payments;
 - force DonationAlerts polling;
-- rotate the public free key.
+- create admin VPN keys without payment;
+- rotate the public free key;
 - manually clean expired subscriptions.
 
 The bundled `x3ui` Docker service is seeded as the first node. Remote nodes work the same way: run 3x-ui on another server, expose its panel URL to the backend, then add it in `/admin`.
@@ -135,9 +137,9 @@ Payment matching works without webhooks:
 
 1. User clicks `Купить пакет`.
 2. Bot creates a pending order with a unique code like `MILO-123456-ABCDEF`.
-3. User sends a DonationAlerts donation and puts that code into the donation message.
+3. Bot sends a backend payment page like `/pay/123`; that page opens DonationAlerts with the order amount and code where supported.
 4. Worker polls `GET /api/v1/alerts/donations`.
-5. Backend finds the code, checks amount/currency and activates the subscription for that Telegram user.
+5. Backend finds the code, checks currency and the required tariff amount, then activates the subscription for that Telegram user.
 
 Repeated clicks on the same plan reuse the user's active pending order instead of creating duplicate unpaid orders. If the user switches to another plan, older active pending orders are expired.
 

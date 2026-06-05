@@ -15,6 +15,7 @@ from app.services.admin_auth import (
     verify_admin_profile_signature,
     verify_telegram_login,
 )
+from app.services.admin_keys import create_admin_key
 from app.services.billing import poll_donations
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
 from app.services.node_monitor import format_bytes, local_key_counts, refresh_all_nodes, refresh_node_status
@@ -174,6 +175,25 @@ async def rotate_public_key_action(
     return redirect_to_admin(request)
 
 
+@router.post("/admin/admin-keys")
+async def create_admin_key_action(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> HTMLResponse:
+    form = await request.form()
+    telegram_id_raw = str(form.get("telegram_id") or "").strip()
+    if not telegram_id_raw.isdigit():
+        raise HTTPException(status_code=400, detail="Telegram ID is required")
+
+    telegram_id = int(telegram_id_raw)
+    user = await get_or_create_admin_user(session, telegram_id)
+    key = await create_admin_key(session, user)
+    await session.commit()
+    await session.refresh(key)
+    return HTMLResponse(render_admin_key_page(key, telegram_id, request.query_params.get("token", "")))
+
+
 @router.post("/admin/subscriptions/cleanup-expired")
 async def cleanup_expired_subscriptions_action(
     request: Request,
@@ -207,6 +227,31 @@ async def get_admin_user(session: AsyncSession, telegram_id: int) -> User | None
     if not await is_admin_telegram_id(session, telegram_id):
         return None
     return await session.scalar(select(User).where(User.telegram_id == telegram_id))
+
+
+async def get_or_create_admin_user(session: AsyncSession, telegram_id: int) -> User:
+    if not await is_admin_telegram_id(session, telegram_id):
+        raise HTTPException(status_code=403, detail="Telegram ID is not an admin")
+
+    user = await session.scalar(select(User).where(User.telegram_id == telegram_id))
+    if user is None:
+        user = User(
+            telegram_id=telegram_id,
+            username=None,
+            first_name=None,
+            role="admin",
+            created_at=utcnow(),
+        )
+        session.add(user)
+    else:
+        user.role = "admin"
+
+    existing = await session.scalar(select(BotAdmin).where(BotAdmin.telegram_id == telegram_id))
+    if existing is None:
+        session.add(BotAdmin(telegram_id=telegram_id, added_at=utcnow()))
+
+    await session.flush()
+    return user
 
 
 async def is_admin_telegram_id(session: AsyncSession, telegram_id: int) -> bool:
@@ -468,7 +513,9 @@ def render_admin_page(
     pending_orders: list[Order],
     token: str,
 ) -> str:
+    settings = get_settings()
     token_qs = f"?{urlencode({'token': token})}" if token else ""
+    default_admin_id = str(settings.admin_ids[0]) if settings.admin_ids else ""
     node_rows = "\n".join(render_node_row(node, node_counts.get(node.id, {}), token_qs) for node in nodes) or table_empty(
         "Нод пока нет"
     )
@@ -639,6 +686,15 @@ def render_admin_page(
       </section>
 
       <section class="panel">
+        <h2>Админские ключи</h2>
+        <form method="post" action="/admin/admin-keys{token_qs}" class="grid">
+          <label>Telegram ID админа<input name="telegram_id" value="{escape(default_admin_id)}" inputmode="numeric"></label>
+          <div class="actions"><button type="submit">Создать admin key</button></div>
+        </form>
+        <p class="muted" style="margin-top: 10px;">Ключ создаётся без оплаты и привязывается к Telegram ID админа.</p>
+      </section>
+
+      <section class="panel">
         <h2>Ноды</h2>
         <div class="actions" style="margin-bottom: 12px;">
           <form method="post" action="/admin/nodes/refresh{token_qs}"><button type="submit">Обновить статус всех нод</button></form>
@@ -721,6 +777,36 @@ def render_admin_page(
           </thead>
           <tbody>{order_rows}</tbody>
         </table>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def render_admin_key_page(key: VpnKey, telegram_id: int, token: str) -> str:
+    token_qs = f"?{urlencode({'token': token})}" if token else ""
+    return f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Admin key</title>
+    <style>{profile_page_css()}</style>
+  </head>
+  <body>
+    <main class="profile-shell">
+      <section class="profile-panel">
+        <p class="eyebrow">MiloshVPN</p>
+        <h1>Админский ключ создан</h1>
+        <dl>
+          <div><dt>Telegram ID</dt><dd><code>{telegram_id}</code></dd></div>
+          <div><dt>Label</dt><dd><code>{escape(key.email)}</code></dd></div>
+        </dl>
+        <p class="muted">VLESS ключ</p>
+        <code>{escape(key.vless_uri)}</code>
+        <div class="actions" style="margin-top: 18px;">
+          <a class="button" href="/admin{token_qs}">Вернуться в админку</a>
+        </div>
       </section>
     </main>
   </body>

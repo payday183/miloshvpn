@@ -178,7 +178,8 @@ async def process_donation(session: AsyncSession, donation: dict[str, Any]) -> b
     if currency not in {"RUB", "RUR"}:
         return True
 
-    if amount < Decimal(order.amount_rub):
+    required_amount = await required_order_amount(session, order)
+    if amount < required_amount:
         return True
 
     user = await session.get(User, order.user_id)
@@ -190,6 +191,14 @@ async def process_donation(session: AsyncSession, donation: dict[str, Any]) -> b
     order.donation_alert_id = external_id
     await create_or_extend_subscription(session, user, order.plan_code)
     return True
+
+
+async def required_order_amount(session: AsyncSession, order: Order) -> Decimal:
+    required = Decimal(order.amount_rub)
+    plan = await session.get(Plan, order.plan_code)
+    if plan is not None:
+        required = max(required, Decimal(plan.price_rub))
+    return required
 
 
 def extract_payment_code(text: str) -> str | None:

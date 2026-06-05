@@ -12,7 +12,9 @@ from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.models import Order, Plan
 from app.services.admin_auth import build_admin_profile_url
+from app.services.admin_keys import create_admin_key
 from app.services.billing import create_order, poll_donations
+from app.services.payment_links import payment_page_url
 from app.services.public_keys import get_active_public_key, public_key_post_text, rotate_public_key
 from app.services.stats import collect_stats
 from app.services.users import add_admin, get_or_create_user, is_admin
@@ -20,6 +22,7 @@ from app.services.vpn import get_active_key, get_active_subscription
 from app.tg import keyboards as kb
 from app.tg.texts import (
     admin_help_text,
+    admin_key_text,
     free_key_text,
     instruction_text,
     payment_text,
@@ -110,7 +113,7 @@ async def buy_plan(callback: CallbackQuery) -> None:
         plan = await session.get(Plan, plan_code)
     await callback.message.answer(
         payment_text(order, plan),
-        reply_markup=kb.check_payment_keyboard(order.id),
+        reply_markup=kb.check_payment_keyboard(order.id, payment_page_url(order.id)),
         parse_mode=ParseMode.HTML,
     )
     await callback.answer()
@@ -172,6 +175,26 @@ async def admin_panel(message: Message) -> None:
         await message.answer("Админка закрыта.")
         return
     await message.answer(admin_help_text(), reply_markup=kb.admin_keyboard(), parse_mode=ParseMode.HTML)
+
+
+@router.message((F.text == kb.ADMIN_CREATE_KEY) | Command("admin_key"))
+async def create_admin_key_command(message: Message) -> None:
+    _, admin = await current_user(message)
+    if not admin:
+        return
+
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
+        key = await create_admin_key(session, user)
+        await session.commit()
+        await session.refresh(key)
+
+    await message.answer(admin_key_text(key), parse_mode=ParseMode.HTML, reply_markup=kb.admin_keyboard())
 
 
 @router.message(F.text == kb.ADMIN_STATS)

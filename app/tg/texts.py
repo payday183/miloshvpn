@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from app.config import get_settings
 from app.models import Order, Plan, Subscription, User, VpnKey
+from app.services.payment_links import payment_page_url
 from app.services.public_keys import public_key_post_text
 
 
@@ -35,17 +36,15 @@ def plans_text(plans: list[Plan]) -> str:
 
 
 def payment_text(order: Order, plan: Plan) -> str:
-    settings = get_settings()
-    donate_url = escape(settings.donationalerts_donate_url or "DonationAlerts URL еще не задан в .env")
+    payment_url = escape(payment_page_url(order.id))
+    required_amount = max(Decimal(order.amount_rub), Decimal(plan.price_rub))
     return (
         "Заказ создан.\n\n"
         f"Тариф: {escape(plan.title)}\n"
-        f"Сумма: {format_price(order.amount_rub)} RUB\n"
+        f"Проверьте, чтобы сумма была <b>{format_price(required_amount)} RUB</b>.\n"
         f"Код оплаты: <code>{order.payment_code}</code>\n\n"
-        "Открой DonationAlerts и вставь этот код в сообщение к донату. "
-        "По нему backend поймет, что оплатил именно твой Telegram.\n\n"
-        f"{donate_url}\n\n"
-        "После оплаты нажми <b>Проверить оплату</b>. Если DonationAlerts token настроен, проверка пройдет без вебхуков."
+        f'<a href="{payment_url}">Открыть страницу оплаты</a>\n\n'
+        "После оплаты нажми <b>Проверить оплату</b>."
     )
 
 
@@ -73,6 +72,14 @@ def free_key_text(key: VpnKey | None) -> str:
     return public_key_post_text(key)
 
 
+def admin_key_text(key: VpnKey) -> str:
+    return (
+        "Админский ключ создан без оплаты.\n\n"
+        f"Label: <code>{escape(key.email)}</code>\n"
+        f"VLESS ключ:\n<code>{escape(key.vless_uri)}</code>"
+    )
+
+
 def instruction_text() -> str:
     return (
         "Инструкция\n\n"
@@ -94,8 +101,9 @@ def admin_help_text() -> str:
 
     return (
         "Админка\n\n"
-        f"Web-панель: {escape(panel_url)}\n\n"
+        f'Web-панель: <a href="{escape(panel_url)}">открыть</a>\n\n'
         "<code>/add_admin TELEGRAM_ID</code> - добавить админа.\n"
+        "<code>/admin_key</code> - создать админский ключ без оплаты.\n"
         "<code>/rotate_free</code> - пересоздать бесплатный ключ.\n"
         "<code>/post_free</code> - опубликовать бесплатный ключ в канал/чат из PUBLIC_KEY_CHAT_ID."
     )

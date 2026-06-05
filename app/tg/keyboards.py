@@ -13,6 +13,7 @@ ADMIN_STATS = "Статистика"
 ADMIN_ROTATE_FREE = "Пересоздать free key"
 ADMIN_POST_FREE = "Опубликовать free key"
 ADMIN_PENDING = "Ожидающие оплаты"
+ADMIN_CREATE_KEY = "Создать admin key"
 
 
 def main_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
@@ -31,7 +32,7 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=ADMIN_STATS), KeyboardButton(text=ADMIN_PENDING)],
             [KeyboardButton(text=ADMIN_ROTATE_FREE), KeyboardButton(text=ADMIN_POST_FREE)],
-            [KeyboardButton(text=PROFILE)],
+            [KeyboardButton(text=ADMIN_CREATE_KEY), KeyboardButton(text=PROFILE)],
         ],
         resize_keyboard=True,
     )
@@ -46,12 +47,18 @@ def plans_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def check_payment_keyboard(order_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def check_payment_keyboard(order_id: int, payment_url: str | None = None) -> InlineKeyboardMarkup:
+    buttons = []
+    if payment_url:
+        buttons.append([InlineKeyboardButton(text="Оплатить", url=payment_url)])
+    buttons.extend(
+        [
             [InlineKeyboardButton(text="Проверить оплату", callback_data=f"check_payment:{order_id}")],
             [InlineKeyboardButton(text="Купить другой тариф", callback_data="show_plans")],
         ]
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=buttons
     )
 
 
