@@ -11,6 +11,28 @@ docker compose up -d --build
 
 Open `http://localhost:8080`.
 
+## Development
+
+Work in the `dev` branch:
+
+```sh
+git switch dev
+./scripts/dev.sh up
+```
+
+Open `http://localhost:8081`.
+
+Useful commands:
+
+```sh
+./scripts/dev.sh ps
+./scripts/dev.sh logs
+./scripts/dev.sh restart
+./scripts/dev.sh down
+```
+
+The dev container mounts `public/` and `nginx.conf`, so changes there are visible without rebuilding.
+
 ## Configure git remote
 
 ```sh
@@ -28,6 +50,7 @@ The deploy script:
 
 - fetches `origin/main` or the branch from `DEPLOY_BRANCH`;
 - refuses to run when local uncommitted changes exist;
+- skips when the current branch is not the deploy branch;
 - updates only with a fast-forward merge;
 - rebuilds and restarts Docker Compose.
 
@@ -52,4 +75,4 @@ The timer runs every minute. If `origin` is not configured yet, it exits without
 
 ## Git hook
 
-This repository uses `deploy/git-hooks` as `core.hooksPath`. After a successful `git pull`, the `post-merge` hook rebuilds the Docker Compose service.
+This repository uses `deploy/git-hooks` as `core.hooksPath`. After a successful `git pull` on the deploy branch, the `post-merge` hook rebuilds the Docker Compose service.

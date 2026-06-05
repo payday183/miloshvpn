@@ -3,5 +3,11 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+DEPLOY_BRANCH=${DEPLOY_BRANCH:-main}
+CURRENT_BRANCH=$(git -C "$REPO_DIR" branch --show-current)
 
-"$REPO_DIR/scripts/docker-apply.sh"
+if [ "$CURRENT_BRANCH" = "$DEPLOY_BRANCH" ]; then
+    "$REPO_DIR/scripts/docker-apply.sh"
+else
+    echo "post-merge: branch '$CURRENT_BRANCH' is not deploy branch '$DEPLOY_BRANCH'; skipping Docker apply."
+fi

@@ -4,6 +4,7 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 REPO_DIR=${REPO_DIR:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}
 DEPLOY_BRANCH=${DEPLOY_BRANCH:-main}
+ALLOW_BRANCH_SWITCH=${ALLOW_BRANCH_SWITCH:-0}
 
 cd "$REPO_DIR"
 
@@ -36,6 +37,11 @@ fi
 
 CURRENT_BRANCH=$(git branch --show-current)
 if [ "$CURRENT_BRANCH" != "$DEPLOY_BRANCH" ]; then
+    if [ "$ALLOW_BRANCH_SWITCH" != "1" ]; then
+        echo "Current branch is '$CURRENT_BRANCH', deploy branch is '$DEPLOY_BRANCH'; skipping auto-deploy."
+        exit 0
+    fi
+
     if git show-ref --verify --quiet "refs/heads/$DEPLOY_BRANCH"; then
         git checkout "$DEPLOY_BRANCH"
     else
