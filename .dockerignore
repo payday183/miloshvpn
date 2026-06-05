@@ -1,0 +1,16 @@
+.git
+.agents
+.codex
+.env
+.env.*
+!.env.example
+node_modules
+venv
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.log
+tmp
+dist
+build
