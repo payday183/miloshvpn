@@ -177,7 +177,8 @@ async def admin_panel(message: Message) -> None:
     await message.answer(admin_help_text(), reply_markup=kb.admin_keyboard(), parse_mode=ParseMode.HTML)
 
 
-@router.message((F.text == kb.ADMIN_CREATE_KEY) | Command("admin_key"))
+@router.message(Command("admin_key"))
+@router.message(F.text == kb.ADMIN_CREATE_KEY)
 async def create_admin_key_command(message: Message) -> None:
     _, admin = await current_user(message)
     if not admin:
@@ -227,7 +228,8 @@ async def pending_orders(message: Message) -> None:
     await message.answer(f"Ожидающих оплат: {int(count or 0)}", reply_markup=kb.admin_keyboard())
 
 
-@router.message((F.text == kb.ADMIN_ROTATE_FREE) | Command("rotate_free"))
+@router.message(Command("rotate_free"))
+@router.message(F.text == kb.ADMIN_ROTATE_FREE)
 async def rotate_free(message: Message) -> None:
     _, admin = await current_user(message)
     if not admin:
@@ -237,7 +239,8 @@ async def rotate_free(message: Message) -> None:
     await message.answer(public_key_post_text(key), parse_mode=ParseMode.HTML, reply_markup=kb.admin_keyboard())
 
 
-@router.message((F.text == kb.ADMIN_POST_FREE) | Command("post_free"))
+@router.message(Command("post_free"))
+@router.message(F.text == kb.ADMIN_POST_FREE)
 async def post_free(message: Message, bot: Bot) -> None:
     _, admin = await current_user(message)
     if not admin:
