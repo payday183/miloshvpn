@@ -17,7 +17,7 @@ def start_text(user: User, is_admin: bool, trial_created: bool = False, trial_fa
     return (
         f"✨ Добро пожаловать, дорогой друг!\n\n"
         "MiloshVPN — сервис, который даст тебе доступ ко всем сервисам и белым спискам по доступным ценам.\n\n"
-        f"🎁 {trial_line}\n"
+        f"🎁 {trial_line}\n\n"
         "🛒 Хочешь полный доступ — жми Купить, выбирай тариф и после оплаты нажимай Проверить оплату."
         f"{admin_line}"
     )
@@ -41,9 +41,10 @@ def profile_text(user: User, subscription: Subscription | None, key: VpnKey | No
     traffic = "без лимита" if subscription.traffic_limit_gb is None else f"{subscription.traffic_limit_gb} ГБ"
     lines.append(
         "\n\n💎 Моя подписка\n"
-        f"Тариф: <b>{escape(title)}</b>\n"
-        f"Старт: {subscription.starts_at:%d.%m.%Y %H:%M UTC}\n"
-        f"Финиш: {subscription.expires_at:%d.%m.%Y %H:%M UTC}\n"
+        f"\nТариф: <b>{escape(title)}</b>\n"
+        f"\nСтарт: {subscription.starts_at:%d.%m.%Y %H:%M UTC}\n"
+        f"\nФиниш: {subscription.expires_at:%d.%m.%Y %H:%M UTC}\n"
+        "\n"
         f"Лимит: {traffic}"
     )
 
@@ -55,13 +56,17 @@ def profile_text(user: User, subscription: Subscription | None, key: VpnKey | No
 
 
 def plans_text(plans: list[Plan]) -> str:
-    lines = ["🛒 Тарифы MiloshVPN\n"]
+    lines = ["🛒 Тарифы MiloshVPN", ""]
     for plan in plans:
         traffic = "без лимита" if plan.traffic_gb is None else f"{plan.traffic_gb} ГБ"
-        lines.append(f"💠 <b>{escape(plan.title)}</b>")
-        lines.append(f"Цена: <b>{format_price(plan.price_rub)} RUB</b>")
+        lines.append(f"💠 {escape(plan.title)}")
+        lines.append("")
+        lines.append(f"Цена: {format_price(plan.price_rub)} RUB")
+        lines.append("")
         lines.append(f"Срок: {plan.days} дней")
+        lines.append("")
         lines.append(f"Трафик: {traffic}")
+        lines.append("")
         lines.append(escape(plan.description))
         lines.append("")
     return "\n".join(lines).strip()
@@ -73,14 +78,15 @@ def payment_text(order: Order, plan: Plan) -> str:
     return (
         "🧾 Заказ готов\n\n"
         f"Тариф: <b>{escape(plan.title)}</b>\n"
-        f"Сумма: <b>{format_price(required_amount)} RUB</b>\n\n"
+        f"\nСумма: <b>{format_price(required_amount)} RUB</b>\n\n"
         "👇 Код для сообщения DonationAlerts. Нажми по нему и скопируй:\n"
         f"{code_frame}\n"
         "Как оплатить:\n"
-        "1. Нажми кнопку <b>Оплатить</b> ниже.\n"
-        "2. В DonationAlerts вручную поставь сумму из этого сообщения.\n"
-        "3. В поле сообщения вставь код из рамки.\n"
-        "4. Если DonationAlerts открыл EUR или 10 ₽, выбери RUB и впиши сумму тарифа руками.\n"
+        "\n1. Нажми кнопку <b>Оплатить</b> ниже.\n"
+        "\n2. В DonationAlerts вручную поставь сумму из этого сообщения.\n"
+        "\n3. В поле сообщения вставь код из рамки.\n"
+        "\n4. Если DonationAlerts открыл EUR или 10 ₽, выбери RUB и впиши сумму тарифа руками.\n"
+        "\n"
         "5. После оплаты вернись в бот и нажми <b>Проверить оплату</b>.\n\n"
         "Важно: backend засчитает только правильную сумму в RUB/RUR и именно этот код."
     )
@@ -95,8 +101,9 @@ def subscription_text(subscription: Subscription | None, key: VpnKey | None) -> 
     text = (
         "💎 Моя подписка\n\n"
         f"Тариф: {title}\n"
-        f"Старт: {subscription.starts_at:%d.%m.%Y %H:%M UTC}\n"
-        f"Финиш: {subscription.expires_at:%d.%m.%Y %H:%M UTC}\n"
+        f"\nСтарт: {subscription.starts_at:%d.%m.%Y %H:%M UTC}\n"
+        f"\nФиниш: {subscription.expires_at:%d.%m.%Y %H:%M UTC}\n"
+        "\n"
         f"Лимит: {traffic}"
     )
     if key is not None:
@@ -118,8 +125,9 @@ def instruction_text() -> str:
     return (
         "📘 Инструкция\n\n"
         "1. Установи V2RayNG, Hiddify, Streisand или другой клиент с VLESS.\n"
-        "2. Открой <b>Профиль</b> и скопируй VLESS-ключ.\n"
-        "3. Импортируй ключ из буфера обмена.\n"
+        "\n2. Открой <b>Профиль</b> и скопируй VLESS-ключ.\n"
+        "\n3. Импортируй ключ из буфера обмена.\n"
+        "\n"
         "4. Подключись и проверь Telegram, YouTube, Instagram и обычные сайты.\n\n"
         "По оплате всё просто: бот даёт персональный код, ты вставляешь его в сообщение DonationAlerts, "
         "а система сама найдёт оплату и продлит доступ."

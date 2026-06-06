@@ -11,11 +11,11 @@ from app.timeutils import utcnow
 DEFAULT_PLANS = [
     {
         "code": "basic",
-        "title": "Дешевый тариф",
-        "description": "30 дней, лимит 50 ГБ. Нормальный вход в MiloshVPN без лишнего пафоса.",
+        "title": "Базовый тариф",
+        "description": "30 дней, лимит 500 ГБ. Нормальный вход в MiloshVPN без лишнего пафоса.",
         "price_rub": Decimal("75.00"),
         "days": 30,
-        "traffic_gb": 50,
+        "traffic_gb": 500,
     },
     {
         "code": "unlimited",

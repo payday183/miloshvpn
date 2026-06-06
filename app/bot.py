@@ -116,14 +116,14 @@ async def buy(message: Message) -> None:
     await current_user(message)
     async with SessionLocal() as session:
         plans = (await session.scalars(select(Plan).where(Plan.is_active.is_(True)))).all()
-    await message.answer(plans_text(list(plans)), reply_markup=kb.plans_keyboard())
+    await message.answer(plans_text(list(plans)), reply_markup=kb.plans_keyboard(), parse_mode=ParseMode.HTML)
 
 
 @router.callback_query(F.data == "show_plans")
 async def show_plans(callback: CallbackQuery) -> None:
     async with SessionLocal() as session:
         plans = (await session.scalars(select(Plan).where(Plan.is_active.is_(True)))).all()
-    await callback.message.answer(plans_text(list(plans)), reply_markup=kb.plans_keyboard())
+    await callback.message.answer(plans_text(list(plans)), reply_markup=kb.plans_keyboard(), parse_mode=ParseMode.HTML)
     await callback.answer()
 
 

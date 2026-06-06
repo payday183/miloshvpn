@@ -46,7 +46,7 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
 def plans_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💠 75 RUB — Дешевый тариф", callback_data="buy:basic")],
+            [InlineKeyboardButton(text="💠 75 RUB — Базовый тариф", callback_data="buy:basic")],
             [InlineKeyboardButton(text="🚀 95 RUB — Без ограничений", callback_data="buy:unlimited")],
         ]
     )
