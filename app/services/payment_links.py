@@ -1,6 +1,6 @@
 from decimal import Decimal
 from typing import Mapping
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from app.config import get_settings
 from app.models import Order
@@ -17,13 +17,9 @@ def donation_url_for_order(order: Order, amount: Decimal | None = None, *, email
     if not settings.donationalerts_donate_url:
         return ""
 
+    _ = (order, amount, email)
     parts = urlsplit(settings.donationalerts_donate_url)
-    query = dict(parse_qsl(parts.query, keep_blank_values=True))
-    query["amount"] = format_amount(amount or order.amount_rub)
-    query["message"] = order.payment_code
-    if email:
-        query["email"] = email
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, "", parts.fragment))
 
 
 def public_url(path: str, query: Mapping[str, str] | None = None) -> str:

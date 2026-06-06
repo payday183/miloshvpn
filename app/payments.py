@@ -35,7 +35,6 @@ async def payment_page(
 async def payment_donate(
     order_id: int,
     code: str = Query(default=""),
-    email: str = Query(default=""),
     session: AsyncSession = Depends(get_session),
 ) -> RedirectResponse:
     order = await session.get(Order, order_id)
@@ -43,7 +42,7 @@ async def payment_donate(
         raise HTTPException(status_code=404, detail="Order not found")
     require_payment_code(order, code)
 
-    donation_url = donation_url_for_order(order, await required_order_amount(session, order), email=clean_email(email))
+    donation_url = donation_url_for_order(order, await required_order_amount(session, order))
     if not donation_url:
         raise HTTPException(status_code=400, detail="DonationAlerts URL is not configured")
     return RedirectResponse(donation_url, status_code=303)
@@ -52,13 +51,6 @@ async def payment_donate(
 def require_payment_code(order: Order, code: str) -> None:
     if not code or not secrets.compare_digest(code, order.payment_code):
         raise HTTPException(status_code=404, detail="Order not found")
-
-
-def clean_email(value: str) -> str | None:
-    email = value.strip()
-    if not email:
-        return None
-    return email[:255]
 
 
 def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, required_amount) -> str:
@@ -70,7 +62,7 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
     donate_path = f"/pay/{order.id}/donate?code={payment_code}"
     can_open_donation = is_active and can_donate
     donate_link = (
-        f'<a class="button" href="{donate_path}" rel="nofollow">Открыть DonationAlerts</a>'
+        f'<a class="button" href="{donate_path}" rel="nofollow" data-donation-link>Открыть DonationAlerts</a>'
         if can_open_donation
         else '<p class="muted">Ссылка DonationAlerts не настроена или заказ уже не ожидает оплату.</p>'
     )
@@ -92,7 +84,7 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
         const status = document.querySelector("[data-status]");
         const opened = window.sessionStorage && sessionStorage.getItem(redirectKey);
         if (opened) {{
-          if (status) status.textContent = "DonationAlerts уже открывался. Код оставлен здесь, если поле сообщения пустое.";
+          if (status) status.textContent = "DonationAlerts уже открывался. Введи сумму и вставь код в сообщение.";
           return;
         }}
         if (window.sessionStorage) sessionStorage.setItem(redirectKey, "1");
@@ -101,7 +93,7 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
             if (status) status.textContent = "Код скопирован. Открываю DonationAlerts...";
           }})
           .catch(function () {{
-            if (status) status.textContent = "Открываю DonationAlerts. Если сообщение пустое, вставь код с этой страницы.";
+            if (status) status.textContent = "Открываю DonationAlerts. Введи сумму и вставь код в сообщение.";
           }})
           .finally(function () {{
             window.setTimeout(function () {{
@@ -110,7 +102,18 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
           }});
       }}
 
-      window.addEventListener("DOMContentLoaded", openDonationAlerts);
+      window.addEventListener("DOMContentLoaded", function () {{
+        const link = document.querySelector("[data-donation-link]");
+        if (link) {{
+          link.addEventListener("click", function (event) {{
+            event.preventDefault();
+            copyPaymentCode().finally(function () {{
+              window.location.href = donationUrl;
+            }});
+          }});
+        }}
+        openDonationAlerts();
+      }});
     </script>
         """
         if can_open_donation
@@ -186,7 +189,7 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
         <code>{payment_code}</code>
         <p class="status" data-status>Открываю DonationAlerts...</p>
         {donate_link}
-        <p class="muted" style="margin-top: 16px;">Backend засчитает оплату только с этой суммой и этим кодом.</p>
+        <p class="muted" style="margin-top: 16px;">DonationAlerts не подставляет поля из ссылки. Backend засчитает оплату только с этой суммой и этим кодом.</p>
       </section>
     </main>
     {redirect_script}
