@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     admin_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
     admin_web_token: str = ""
     admin_panel_url: str = "http://localhost:8081/admin"
+    payment_public_url: str = ""
 
     donationalerts_token: str = ""
     donationalerts_donate_url: str = ""

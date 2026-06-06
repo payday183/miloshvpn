@@ -8,8 +8,8 @@ from app.models import Order
 
 def payment_page_url(order: Order | int) -> str:
     if isinstance(order, Order):
-        return public_url(f"/pay/{order.id}", {"code": order.payment_code})
-    return public_url(f"/pay/{order}")
+        return payment_public_url(f"/pay/{order.id}", {"code": order.payment_code})
+    return payment_public_url(f"/pay/{order}")
 
 
 def donation_url_for_order(order: Order, amount: Decimal | None = None, *, email: str | None = None) -> str:
@@ -29,9 +29,20 @@ def donation_url_for_order(order: Order, amount: Decimal | None = None, *, email
 def public_url(path: str, query: Mapping[str, str] | None = None) -> str:
     settings = get_settings()
     base = settings.admin_panel_url or f"http://localhost:{settings.app_port}/admin"
+    return build_url(base, path, query)
+
+
+def payment_public_url(path: str, query: Mapping[str, str] | None = None) -> str:
+    settings = get_settings()
+    base = settings.payment_public_url or settings.admin_panel_url or f"http://localhost:{settings.app_port}/admin"
+    return build_url(base, path, query)
+
+
+def build_url(base: str, path: str, query: Mapping[str, str] | None = None) -> str:
     parts = urlsplit(base)
     if not parts.scheme or not parts.netloc:
-        parts = urlsplit(f"http://localhost:{settings.app_port}/admin")
+        settings = get_settings()
+        parts = urlsplit(f"http://localhost:{settings.app_port}")
     return urlunsplit((parts.scheme, parts.netloc, path, urlencode(query or {}), ""))
 
 
