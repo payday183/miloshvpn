@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     public_key_enabled: bool = True
     public_key_rotate_hours: int = 24
     public_key_chat_id: str = ""
+    free_trial_enabled: bool = True
+    free_trial_days: int = 7
+    free_trial_traffic_gb: int = 10
     node_status_poll_interval_seconds: int = 60
     expired_subscription_cleanup_enabled: bool = True
     expired_subscription_cleanup_interval_seconds: int = 300

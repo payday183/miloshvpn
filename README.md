@@ -45,12 +45,11 @@ If Docker Desktop is installed on Windows, enable WSL integration for this distr
 
 Main buttons:
 
+- `Купить`
 - `Профиль`
-- `Моя подписка`
-- `Купить пакет`
-- `Продлить`
-- `Бесплатный ключ`
 - `Инструкция`
+- `Политика проекта`
+- `Поддержка`
 - `Админка` for admins
 
 Admin commands:
@@ -130,14 +129,15 @@ Plans:
 
 - `75 RUB` - cheap plan for 30 days, 50 GB;
 - `95 RUB` - unlimited plan for 30 days.
+- free trial - 7 days, 10 GB by default.
 
 Every paid plan is issued for one month (`30` days). Renewing an active subscription adds another 30 days to the current expiry date.
 
 Payment matching works without webhooks:
 
-1. User clicks `Купить пакет`.
+1. User clicks `Купить`.
 2. Bot creates a pending order with a unique code like `MILO-123456-ABCDEF`.
-3. Bot sends a backend payment page like `/pay/123`; that page opens DonationAlerts with the order amount and code where supported.
+3. Bot sends a lightweight click-to-copy page; one click copies the code and opens DonationAlerts.
 4. Worker polls `GET /api/v1/alerts/donations`.
 5. Backend finds the code, checks currency and the required tariff amount, then activates the subscription for that Telegram user.
 
@@ -150,6 +150,14 @@ DONATIONALERTS_TOKEN=
 DONATIONALERTS_DONATE_URL=
 DONATIONALERTS_FETCH_LIMIT=50
 DONATIONALERTS_FETCH_PAGES=3
+```
+
+Trial settings:
+
+```env
+FREE_TRIAL_ENABLED=true
+FREE_TRIAL_DAYS=7
+FREE_TRIAL_TRAFFIC_GB=10
 ```
 
 DonationAlerts responses are paginated. The backend fetches up to `DONATIONALERTS_FETCH_PAGES` pages with `DONATIONALERTS_FETCH_LIMIT` items each, using a short delay between pages to stay under the API rate limit.

@@ -27,8 +27,11 @@ DEFAULT_PLANS = [
     },
 ]
 
+TRIAL_PLAN_CODE = "trial"
+
 
 async def seed_defaults(session: AsyncSession) -> None:
+    settings = get_settings()
     for payload in DEFAULT_PLANS:
         plan = await session.get(Plan, payload["code"])
         if plan is None:
@@ -41,7 +44,25 @@ async def seed_defaults(session: AsyncSession) -> None:
             plan.traffic_gb = payload["traffic_gb"]
             plan.is_active = True
 
-    settings = get_settings()
+    trial_payload = {
+        "code": TRIAL_PLAN_CODE,
+        "title": "Бесплатный 7-дневный ключ",
+        "description": "Автоматический trial-доступ после старта бота.",
+        "price_rub": Decimal("0.00"),
+        "days": settings.free_trial_days,
+        "traffic_gb": settings.free_trial_traffic_gb,
+    }
+    trial_plan = await session.get(Plan, TRIAL_PLAN_CODE)
+    if trial_plan is None:
+        session.add(Plan(**trial_payload, is_active=False))
+    else:
+        trial_plan.title = trial_payload["title"]
+        trial_plan.description = trial_payload["description"]
+        trial_plan.price_rub = trial_payload["price_rub"]
+        trial_plan.days = trial_payload["days"]
+        trial_plan.traffic_gb = trial_payload["traffic_gb"]
+        trial_plan.is_active = False
+
     for telegram_id in settings.admin_ids:
         existing = await session.scalar(select(BotAdmin).where(BotAdmin.telegram_id == telegram_id))
         if existing is None:

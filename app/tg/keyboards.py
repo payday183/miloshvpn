@@ -3,10 +3,12 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 
 PROFILE = "Профиль"
 SUBSCRIPTION = "Моя подписка"
-BUY = "Купить пакет"
+BUY = "Купить"
 EXTEND = "Продлить"
 FREE_KEY = "Бесплатный ключ"
 HELP = "Инструкция"
+POLICY = "Политика проекта"
+SUPPORT = "Поддержка"
 ADMIN = "Админка"
 
 ADMIN_STATS = "Статистика"
@@ -18,9 +20,9 @@ ADMIN_CREATE_KEY = "Создать admin key"
 
 def main_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton(text=PROFILE), KeyboardButton(text=SUBSCRIPTION)],
-        [KeyboardButton(text=BUY), KeyboardButton(text=EXTEND)],
-        [KeyboardButton(text=FREE_KEY), KeyboardButton(text=HELP)],
+        [KeyboardButton(text=BUY), KeyboardButton(text=PROFILE)],
+        [KeyboardButton(text=HELP), KeyboardButton(text=POLICY)],
+        [KeyboardButton(text=SUPPORT)],
     ]
     if is_admin:
         keyboard.append([KeyboardButton(text=ADMIN)])

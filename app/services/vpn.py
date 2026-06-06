@@ -10,6 +10,8 @@ from app.services.nodes import select_node_for_key
 from app.services.x3ui import X3UIClient
 from app.timeutils import utcnow
 
+TRIAL_PLAN_CODE = "trial"
+
 
 async def active_private_key_count(session: AsyncSession, node_id: int | None = None) -> int:
     query = select(func.count()).select_from(VpnKey).where(
@@ -103,6 +105,41 @@ async def create_private_key(session: AsyncSession, user: User, subscription: Su
     return key
 
 
+async def ensure_trial_subscription(session: AsyncSession, user: User) -> tuple[Subscription | None, VpnKey | None, bool]:
+    settings = get_settings()
+    active_subscription = await get_active_subscription(session, user.id)
+    active_key = await get_active_key(session, user.id)
+    if active_subscription is not None:
+        if active_key is None:
+            active_key = await create_private_key(session, user, active_subscription)
+        return active_subscription, active_key, False
+
+    if not settings.free_trial_enabled:
+        return None, None, False
+
+    existing_trial = await session.scalar(
+        select(Subscription.id).where(Subscription.user_id == user.id, Subscription.plan_code == TRIAL_PLAN_CODE)
+    )
+    if existing_trial is not None:
+        return None, None, False
+
+    days = max(1, settings.free_trial_days)
+    traffic_gb = max(1, settings.free_trial_traffic_gb)
+    now = utcnow()
+    subscription = Subscription(
+        user_id=user.id,
+        plan_code=TRIAL_PLAN_CODE,
+        status="active",
+        starts_at=now,
+        expires_at=now + timedelta(days=days),
+        traffic_limit_gb=traffic_gb,
+    )
+    session.add(subscription)
+    await session.flush()
+    key = await create_private_key(session, user, subscription)
+    return subscription, key, True
+
+
 async def create_or_extend_subscription(session: AsyncSession, user: User, plan_code: str) -> Subscription:
     from app.models import Plan
 
@@ -112,9 +149,15 @@ async def create_or_extend_subscription(session: AsyncSession, user: User, plan_
 
     now = utcnow()
     subscription = await get_active_subscription(session, user.id)
+    base_expires_at = None
+    if subscription is not None and subscription.plan_code == TRIAL_PLAN_CODE:
+        base_expires_at = subscription.expires_at
+        subscription.status = "upgraded"
+        subscription = None
+
     if subscription is None:
         starts_at = now
-        expires_at = now + timedelta(days=plan.days)
+        expires_at = max(base_expires_at or now, now) + timedelta(days=plan.days)
         subscription = Subscription(
             user_id=user.id,
             plan_code=plan.code,

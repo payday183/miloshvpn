@@ -18,18 +18,19 @@ from app.services.payment_links import payment_page_url
 from app.services.public_keys import get_active_public_key, public_key_post_text, rotate_public_key
 from app.services.stats import collect_stats
 from app.services.users import add_admin, get_or_create_user, is_admin
-from app.services.vpn import get_active_key, get_active_subscription
+from app.services.vpn import ensure_trial_subscription, get_active_key, get_active_subscription
 from app.tg import keyboards as kb
 from app.tg.texts import (
     admin_help_text,
     admin_key_text,
-    free_key_text,
     instruction_text,
     payment_text,
+    policy_text,
     plans_text,
     profile_text,
     start_text,
     subscription_text,
+    support_text,
 )
 from app.timeutils import utcnow
 
@@ -50,40 +51,61 @@ async def current_user(message: Message):
         return user, admin
 
 
+async def grant_trial_for_start(message: Message) -> bool | None:
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
+        try:
+            _, _, created = await ensure_trial_subscription(session, user)
+            await session.commit()
+            return created
+        except Exception:
+            await session.rollback()
+            logging.exception("Failed to issue trial key for telegram_id=%s", message.from_user.id)
+            return None
+
+
 @router.message(CommandStart())
 async def start(message: Message) -> None:
     user, admin = await current_user(message)
-    await message.answer(start_text(user, admin), reply_markup=kb.main_keyboard(admin))
-
-
-@router.message(F.text == kb.PROFILE)
-async def profile(message: Message) -> None:
-    user, admin = await current_user(message)
-    if admin:
-        profile_url = build_admin_profile_url(user.telegram_id)
-        await message.answer(
-            "Профиль администратора\n\nОткрой страницу профиля через Telegram.",
-            reply_markup=kb.admin_profile_keyboard(profile_url),
-        )
-        return
-
-    await message.answer(profile_text(user), reply_markup=kb.main_keyboard(admin), parse_mode=ParseMode.HTML)
-
-
-@router.message(F.text == kb.SUBSCRIPTION)
-async def subscription(message: Message) -> None:
-    user, admin = await current_user(message)
-    async with SessionLocal() as session:
-        subscription_obj = await get_active_subscription(session, user.id)
-        key = await get_active_key(session, user.id)
+    trial_result = await grant_trial_for_start(message)
     await message.answer(
-        subscription_text(subscription_obj, key),
+        start_text(user, admin, trial_created=trial_result is True, trial_failed=trial_result is None),
         reply_markup=kb.main_keyboard(admin),
         parse_mode=ParseMode.HTML,
     )
 
 
-@router.message((F.text == kb.BUY) | (F.text == kb.EXTEND))
+@router.message(F.text == kb.PROFILE)
+async def profile(message: Message) -> None:
+    user, admin = await current_user(message)
+    async with SessionLocal() as session:
+        subscription_obj = await get_active_subscription(session, user.id)
+        plan = await session.get(Plan, subscription_obj.plan_code) if subscription_obj is not None else None
+        key = await get_active_key(session, user.id)
+    reply_markup = kb.admin_profile_keyboard(build_admin_profile_url(user.telegram_id)) if admin else kb.main_keyboard(admin)
+    await message.answer(profile_text(user, subscription_obj, key, plan), reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+
+
+@router.message((F.text == kb.SUBSCRIPTION) | (F.text == kb.FREE_KEY))
+async def subscription(message: Message) -> None:
+    user, admin = await current_user(message)
+    async with SessionLocal() as session:
+        subscription_obj = await get_active_subscription(session, user.id)
+        plan = await session.get(Plan, subscription_obj.plan_code) if subscription_obj is not None else None
+        key = await get_active_key(session, user.id)
+    await message.answer(
+        profile_text(user, subscription_obj, key, plan),
+        reply_markup=kb.main_keyboard(admin),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message((F.text == kb.BUY) | (F.text == "Купить пакет") | (F.text == kb.EXTEND))
 async def buy(message: Message) -> None:
     await current_user(message)
     async with SessionLocal() as session:
@@ -154,18 +176,22 @@ async def check_payment(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.message(F.text == kb.FREE_KEY)
-async def free_key(message: Message) -> None:
-    await current_user(message)
-    async with SessionLocal() as session:
-        key = await get_active_public_key(session)
-    await message.answer(free_key_text(key), parse_mode=ParseMode.HTML)
-
-
 @router.message(F.text == kb.HELP)
 async def help_text(message: Message) -> None:
-    await current_user(message)
-    await message.answer(instruction_text(), parse_mode=ParseMode.HTML)
+    _, admin = await current_user(message)
+    await message.answer(instruction_text(), reply_markup=kb.main_keyboard(admin), parse_mode=ParseMode.HTML)
+
+
+@router.message(F.text == kb.POLICY)
+async def project_policy(message: Message) -> None:
+    _, admin = await current_user(message)
+    await message.answer(policy_text(), reply_markup=kb.main_keyboard(admin), parse_mode=ParseMode.HTML)
+
+
+@router.message(F.text == kb.SUPPORT)
+async def support(message: Message) -> None:
+    _, admin = await current_user(message)
+    await message.answer(support_text(), reply_markup=kb.main_keyboard(admin), parse_mode=ParseMode.HTML)
 
 
 @router.message(F.text == kb.ADMIN)

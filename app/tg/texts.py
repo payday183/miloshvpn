@@ -4,25 +4,58 @@ from decimal import Decimal
 from app.config import get_settings
 from app.models import Order, Plan, Subscription, User, VpnKey
 from app.services.payment_links import payment_page_url
-from app.services.public_keys import public_key_post_text
+from app.services.vpn import TRIAL_PLAN_CODE
 
 
-def start_text(user: User, is_admin: bool) -> str:
-    role = "админ" if is_admin else "пользователь"
+def start_text(user: User, is_admin: bool, trial_created: bool = False, trial_failed: bool = False) -> str:
+    greeting = f"Привет, {escape(user.first_name)}!" if user.first_name else "Привет!"
+    if trial_failed:
+        trial_line = "Не смог автоматически выдать trial-ключ. Напиши в поддержку, если ключ не появился в Профиле."
+    elif trial_created:
+        trial_line = "Бесплатный 7-дневный ключ уже выдан автоматически. Открой Профиль, чтобы скопировать его."
+    else:
+        trial_line = "Твой ключ, подписка и сроки находятся в Профиле."
+    admin_line = "\n\nАдминка доступна отдельной кнопкой." if is_admin else ""
     return (
-        f"MiloshVPN запущен. Ты вошел как {role}.\n\n"
-        "Выбирай тариф, оплачивай через DonationAlerts с персональным кодом, получай VLESS-ключ."
+        f"{greeting}\n\n"
+        "Это MiloshVPN: быстрый доступ через VLESS-ключ, тарифы и trial в одном боте.\n\n"
+        f"{trial_line}\n"
+        "Для покупки нажми Купить, после оплаты нажми Проверить оплату."
+        f"{admin_line}"
     )
 
 
-def profile_text(user: User) -> str:
+def profile_text(user: User, subscription: Subscription | None, key: VpnKey | None, plan: Plan | None = None) -> str:
     username = f"@{escape(user.username)}" if user.username else "не указан"
-    return (
+    lines = [
         "Профиль\n\n"
         f"Telegram ID: <code>{user.telegram_id}</code>\n"
         f"Username: {username}\n"
         f"Роль: {user.role}"
+    ]
+
+    if subscription is None:
+        lines.append("\n\nПодписка: нет активной подписки")
+        lines.append("\nБесплатный trial выдаётся один раз при старте бота.")
+        return "".join(lines)
+
+    title = plan.title if plan is not None else subscription.plan_code
+    if subscription.plan_code == TRIAL_PLAN_CODE:
+        title = "Бесплатный 7-дневный ключ"
+    traffic = "без лимита" if subscription.traffic_limit_gb is None else f"{subscription.traffic_limit_gb} ГБ"
+    lines.append(
+        "\n\nМоя подписка\n"
+        f"Тариф: {escape(title)}\n"
+        f"Начало: {subscription.starts_at:%d.%m.%Y %H:%M UTC}\n"
+        f"Окончание: {subscription.expires_at:%d.%m.%Y %H:%M UTC}\n"
+        f"Трафик: {traffic}"
     )
+
+    if key is not None:
+        lines.append(f"\n\nМой ключ:\n<code>{escape(key.vless_uri)}</code>")
+    else:
+        lines.append("\n\nМой ключ: пока не выдан, попробуй открыть /start или напиши в поддержку.")
+    return "".join(lines)
 
 
 def plans_text(plans: list[Plan]) -> str:
@@ -50,13 +83,15 @@ def payment_text(order: Order, plan: Plan) -> str:
 
 def subscription_text(subscription: Subscription | None, key: VpnKey | None) -> str:
     if subscription is None:
-        return "Активной подписки пока нет. Нажми <b>Купить пакет</b>."
+        return "Активной подписки пока нет. Нажми <b>Купить</b>."
 
     traffic = "без лимита" if subscription.traffic_limit_gb is None else f"{subscription.traffic_limit_gb} ГБ"
+    title = "Бесплатный 7-дневный ключ" if subscription.plan_code == TRIAL_PLAN_CODE else subscription.plan_code
     text = (
         "Моя подписка\n\n"
-        f"Тариф: {subscription.plan_code}\n"
-        f"Действует до: {subscription.expires_at:%d.%m.%Y %H:%M UTC}\n"
+        f"Тариф: {title}\n"
+        f"Начало: {subscription.starts_at:%d.%m.%Y %H:%M UTC}\n"
+        f"Окончание: {subscription.expires_at:%d.%m.%Y %H:%M UTC}\n"
         f"Трафик: {traffic}"
     )
     if key is not None:
@@ -64,12 +99,6 @@ def subscription_text(subscription: Subscription | None, key: VpnKey | None) -> 
     else:
         text += "\n\nКлюч еще не выдан. Напиши админу или попробуй продлить подписку."
     return text
-
-
-def free_key_text(key: VpnKey | None) -> str:
-    if key is None:
-        return "Бесплатного ключа пока нет. Админ может создать его в админке."
-    return public_key_post_text(key)
 
 
 def admin_key_text(key: VpnKey) -> str:
@@ -84,11 +113,29 @@ def instruction_text() -> str:
     return (
         "Инструкция\n\n"
         "1. Установи V2RayNG, Hiddify, Streisand или другой клиент с VLESS.\n"
-        "2. Скопируй VLESS-ключ из <b>Моя подписка</b>.\n"
+        "2. Скопируй VLESS-ключ из <b>Профиль</b>.\n"
         "3. Импортируй ключ из буфера обмена.\n"
         "4. Подключись и проверь сайты.\n\n"
         "Оплата работает так: бот создает персональный код, ты вставляешь его в сообщение DonationAlerts, "
         "worker на backend проверяет донаты polling-ом и активирует подписку."
+    )
+
+
+def policy_text() -> str:
+    return (
+        "Политика проекта\n\n"
+        "1. Один ключ привязан к одному Telegram ID и рассчитан на личное использование.\n"
+        "2. Trial-ключ выдается один раз на 7 дней и имеет лимит трафика.\n"
+        "3. Торренты, Tor, спам, сканирование и перегруз сервера запрещены.\n"
+        "4. Оплата засчитывается только в RUB/RUR, с правильной суммой тарифа и персональным кодом.\n"
+        "5. При нарушении правил ключ может быть отключен."
+    )
+
+
+def support_text() -> str:
+    return (
+        "Поддержка\n\n"
+        "Если возникли проблемы с оплатой, ключом или подключением, напиши: @vandavolmink"
     )
 
 
