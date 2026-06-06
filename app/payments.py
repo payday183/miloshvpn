@@ -61,17 +61,16 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
     payment_code = escape(order.payment_code)
     donate_path = f"/pay/{order.id}/donate?code={payment_code}"
     can_open_donation = is_active and can_donate
-    donate_link = (
-        f'<a class="button" href="{donate_path}" rel="nofollow" data-donation-link>Открыть DonationAlerts</a>'
+    donate_button = (
+        '<button class="button" type="button" data-donation-button>Скопировать код и открыть DonationAlerts</button>'
         if can_open_donation
         else '<p class="muted">Ссылка DonationAlerts не настроена или заказ уже не ожидает оплату.</p>'
     )
-    redirect_script = (
+    donation_script = (
         f"""
     <script>
       const paymentCode = {json.dumps(order.payment_code)};
       const donationUrl = {json.dumps(donate_path)};
-      const redirectKey = "milosh-pay-opened-" + {json.dumps(order.id)} + "-" + paymentCode;
 
       function copyPaymentCode() {{
         if (navigator.clipboard && navigator.clipboard.writeText) {{
@@ -82,37 +81,26 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
 
       function openDonationAlerts() {{
         const status = document.querySelector("[data-status]");
-        const opened = window.sessionStorage && sessionStorage.getItem(redirectKey);
-        if (opened) {{
-          if (status) status.textContent = "DonationAlerts уже открывался. Введи сумму и вставь код в сообщение.";
-          return;
-        }}
-        if (window.sessionStorage) sessionStorage.setItem(redirectKey, "1");
+        if (status) status.textContent = "Копирую код...";
         copyPaymentCode()
           .then(function () {{
-            if (status) status.textContent = "Код скопирован. Открываю DonationAlerts...";
+            if (status) status.textContent = "Код скопирован, открываю DonationAlerts...";
           }})
           .catch(function () {{
-            if (status) status.textContent = "Открываю DonationAlerts. Введи сумму и вставь код в сообщение.";
+            if (status) status.textContent = "Открываю DonationAlerts. Если буфер не сработал, код виден на этой странице.";
           }})
           .finally(function () {{
             window.setTimeout(function () {{
               window.location.href = donationUrl;
-            }}, 550);
+            }}, 250);
           }});
       }}
 
       window.addEventListener("DOMContentLoaded", function () {{
-        const link = document.querySelector("[data-donation-link]");
-        if (link) {{
-          link.addEventListener("click", function (event) {{
-            event.preventDefault();
-            copyPaymentCode().finally(function () {{
-              window.location.href = donationUrl;
-            }});
-          }});
+        const button = document.querySelector("[data-donation-button]");
+        if (button) {{
+          button.addEventListener("click", openDonationAlerts);
         }}
-        openDonationAlerts();
       }});
     </script>
         """
@@ -181,17 +169,17 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
   <body>
     <main>
       <section>
-        <h1>Оплата MiloshVPN</h1>
+        <h1>Переход к оплате</h1>
         <p>{status}</p>
         <p>Тариф: <b>{escape(plan_title)}</b></p>
         <p>Проверьте, чтобы сумма была <b>{amount} RUB</b>.</p>
         <p>Сообщение к донату:</p>
         <code>{payment_code}</code>
-        <p class="status" data-status>Открываю DonationAlerts...</p>
-        {donate_link}
-        <p class="muted" style="margin-top: 16px;">DonationAlerts не подставляет поля из ссылки. Backend засчитает оплату только с этой суммой и этим кодом.</p>
+        {donate_button}
+        <p class="status" data-status></p>
+        <p class="muted" style="margin-top: 16px;">DonationAlerts не подставляет сумму из ссылки. Backend засчитает оплату только с этой суммой и этим кодом.</p>
       </section>
     </main>
-    {redirect_script}
+    {donation_script}
   </body>
 </html>"""

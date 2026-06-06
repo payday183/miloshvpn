@@ -42,8 +42,8 @@ def payment_text(order: Order, plan: Plan) -> str:
         f"Тариф: {escape(plan.title)}\n"
         f"Проверьте, чтобы сумма была <b>{format_price(required_amount)} RUB</b>.\n"
         f"Сообщение к донату: <code>{escape(order.payment_code)}</code>\n"
-        f'<a href="{escape(payment_page_url(order))}">Открыть страницу оплаты</a>\n\n'
-        "Страница сама откроет DonationAlerts и попробует скопировать код.\n"
+        f'<a href="{escape(payment_page_url(order))}">Скопировать код и оплатить</a>\n\n'
+        "Нажми кнопку оплаты ниже: код скопируется кликом, потом откроется DonationAlerts.\n"
         "После оплаты нажми <b>Проверить оплату</b>."
     )
 

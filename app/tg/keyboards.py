@@ -50,7 +50,7 @@ def plans_keyboard() -> InlineKeyboardMarkup:
 def check_payment_keyboard(order_id: int, payment_url: str | None = None) -> InlineKeyboardMarkup:
     buttons = []
     if payment_url:
-        buttons.append([InlineKeyboardButton(text="Оплатить", url=payment_url)])
+        buttons.append([InlineKeyboardButton(text="Скопировать код и оплатить", url=payment_url)])
     buttons.extend(
         [
             [InlineKeyboardButton(text="Проверить оплату", callback_data=f"check_payment:{order_id}")],
