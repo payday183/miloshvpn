@@ -1,3 +1,3 @@
-addmin.duckdns.org, miloshdonationsalertspayworkersprogramm.duckdns.org {
+addmin.duckdns.org {
 	reverse_proxy api:8000
 }

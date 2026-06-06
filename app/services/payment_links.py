@@ -6,12 +6,6 @@ from app.config import get_settings
 from app.models import Order
 
 
-def payment_page_url(order: Order | int) -> str:
-    if isinstance(order, Order):
-        return payment_public_url(f"/pay/{order.id}", {"code": order.payment_code})
-    return payment_public_url(f"/pay/{order}")
-
-
 def donation_url_for_order(order: Order, amount: Decimal | None = None, *, email: str | None = None) -> str:
     settings = get_settings()
     if not settings.donationalerts_donate_url:
@@ -25,12 +19,6 @@ def donation_url_for_order(order: Order, amount: Decimal | None = None, *, email
 def public_url(path: str, query: Mapping[str, str] | None = None) -> str:
     settings = get_settings()
     base = settings.admin_panel_url or f"http://localhost:{settings.app_port}/admin"
-    return build_url(base, path, query)
-
-
-def payment_public_url(path: str, query: Mapping[str, str] | None = None) -> str:
-    settings = get_settings()
-    base = settings.payment_public_url or settings.admin_panel_url or f"http://localhost:{settings.app_port}/admin"
     return build_url(base, path, query)
 
 

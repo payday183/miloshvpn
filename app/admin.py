@@ -22,6 +22,7 @@ from app.services.node_monitor import format_bytes, local_key_counts, refresh_al
 from app.services.nodes import activate_node, create_node, disable_node, list_nodes
 from app.services.public_keys import rotate_public_key
 from app.services.stats import collect_stats
+from app.services.vpn import list_active_private_keys, revoke_private_key
 from app.timeutils import utcnow
 
 router = APIRouter()
@@ -81,7 +82,8 @@ async def admin_panel(
     node_counts = {node.id: await local_key_counts(session, node.id) for node in nodes}
     subscriptions = await active_subscriptions(session)
     pending_orders = await latest_pending_orders(session)
-    return HTMLResponse(render_admin_page(stats, nodes, node_counts, subscriptions, pending_orders, token))
+    private_keys = await list_active_private_keys(session, limit=100)
+    return HTMLResponse(render_admin_page(stats, nodes, node_counts, subscriptions, pending_orders, private_keys, token))
 
 
 @router.post("/admin/nodes")
@@ -192,6 +194,18 @@ async def create_admin_key_action(
     await session.commit()
     await session.refresh(key)
     return HTMLResponse(render_admin_key_page(key, telegram_id, request.query_params.get("token", "")))
+
+
+@router.post("/admin/keys/{key_id}/revoke")
+async def revoke_private_key_action(
+    key_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> RedirectResponse:
+    await revoke_private_key(session, key_id)
+    await session.commit()
+    return redirect_to_admin(request)
 
 
 @router.post("/admin/subscriptions/cleanup-expired")
@@ -511,6 +525,7 @@ def render_admin_page(
     node_counts: dict[int, dict[str, int]],
     subscriptions: list[tuple[Subscription, VpnKey | None]],
     pending_orders: list[Order],
+    private_keys: list[VpnKey],
     token: str,
 ) -> str:
     settings = get_settings()
@@ -521,6 +536,9 @@ def render_admin_page(
     )
     sub_rows = "\n".join(render_subscription_row(subscription, key) for subscription, key in subscriptions) or table_empty(
         "Активных подписок пока нет"
+    )
+    key_rows = "\n".join(render_private_key_row(key, token_qs) for key in private_keys) or table_empty(
+        "Личных активных ключей пока нет"
     )
     order_rows = "\n".join(render_order_row(order) for order in pending_orders) or table_empty("Ожидающих оплат нет")
     return f"""<!doctype html>
@@ -758,6 +776,24 @@ def render_admin_page(
       </section>
 
       <section class="panel">
+        <h2>Личные ключи</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Пользователь</th>
+              <th>Тариф</th>
+              <th>До</th>
+              <th>Нода</th>
+              <th>Label</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>{key_rows}</tbody>
+        </table>
+      </section>
+
+      <section class="panel">
         <h2>Ожидающие оплаты</h2>
         <div class="actions" style="margin-bottom: 12px;">
           <form method="post" action="/admin/donations/poll{token_qs}"><button type="submit">Проверить DonationAlerts</button></form>
@@ -876,6 +912,28 @@ def render_subscription_row(subscription: Subscription, key: VpnKey | None) -> s
       <td>{subscription.expires_at:%d.%m.%Y %H:%M UTC}</td>
       <td>{node_title}</td>
       <td>{key_status}</td>
+    </tr>"""
+
+
+def render_private_key_row(key: VpnKey, token_qs: str) -> str:
+    user = key.user
+    username = f"@{escape(user.username)}" if user and user.username else ""
+    telegram_id = user.telegram_id if user else ""
+    plan = key.subscription.plan_code if key.subscription else key.key_type
+    expires = key.expires_at.strftime("%d.%m.%Y %H:%M UTC") if key.expires_at else "без срока"
+    node_title = escape(key.node.title) if key.node else "не задана"
+    return f"""<tr>
+      <td>{key.id}</td>
+      <td><code>{telegram_id}</code><br>{username}</td>
+      <td>{escape(plan)}</td>
+      <td>{expires}</td>
+      <td>{node_title}</td>
+      <td><code>{escape(key.email)}</code></td>
+      <td>
+        <form method="post" action="/admin/keys/{key.id}/revoke{token_qs}">
+          <button class="danger" type="submit">Удалить</button>
+        </form>
+      </td>
     </tr>"""
 
 

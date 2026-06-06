@@ -70,6 +70,41 @@ async def revoke_user_private_keys(session: AsyncSession, user_id: int) -> None:
         key.revoked_at = now
 
 
+async def list_active_private_keys(session: AsyncSession, limit: int = 30) -> list[VpnKey]:
+    return list(
+        (
+            await session.scalars(
+                select(VpnKey)
+                .options(
+                    selectinload(VpnKey.user),
+                    selectinload(VpnKey.subscription),
+                    selectinload(VpnKey.node),
+                )
+                .where(VpnKey.key_type == "private", VpnKey.active.is_(True))
+                .order_by(VpnKey.created_at.desc())
+                .limit(limit)
+            )
+        ).all()
+    )
+
+
+async def revoke_private_key(session: AsyncSession, key_id: int) -> VpnKey | None:
+    key = await session.scalar(
+        select(VpnKey)
+        .options(selectinload(VpnKey.node))
+        .where(VpnKey.id == key_id, VpnKey.key_type == "private", VpnKey.active.is_(True))
+        .with_for_update()
+    )
+    if key is None:
+        return None
+
+    x3ui = X3UIClient(node=key.node)
+    await x3ui.revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+    key.active = False
+    key.revoked_at = utcnow()
+    return key
+
+
 async def create_private_key(session: AsyncSession, user: User, subscription: Subscription) -> VpnKey:
     settings = get_settings()
     node = await select_node_for_key(session)
@@ -110,8 +145,6 @@ async def ensure_trial_subscription(session: AsyncSession, user: User) -> tuple[
     active_subscription = await get_active_subscription(session, user.id)
     active_key = await get_active_key(session, user.id)
     if active_subscription is not None:
-        if active_key is None:
-            active_key = await create_private_key(session, user, active_subscription)
         return active_subscription, active_key, False
 
     if not settings.free_trial_enabled:

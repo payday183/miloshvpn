@@ -16,6 +16,8 @@ ADMIN_ROTATE_FREE = "Пересоздать free key"
 ADMIN_POST_FREE = "Опубликовать free key"
 ADMIN_PENDING = "Ожидающие оплаты"
 ADMIN_CREATE_KEY = "Создать admin key"
+ADMIN_KEYS = "Личные ключи"
+ADMIN_MAIN_MENU = "Главное меню"
 
 
 def main_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
@@ -33,8 +35,9 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=ADMIN_STATS), KeyboardButton(text=ADMIN_PENDING)],
+            [KeyboardButton(text=ADMIN_KEYS), KeyboardButton(text=ADMIN_CREATE_KEY)],
             [KeyboardButton(text=ADMIN_ROTATE_FREE), KeyboardButton(text=ADMIN_POST_FREE)],
-            [KeyboardButton(text=ADMIN_CREATE_KEY), KeyboardButton(text=PROFILE)],
+            [KeyboardButton(text=PROFILE), KeyboardButton(text=ADMIN_MAIN_MENU)],
         ],
         resize_keyboard=True,
     )
@@ -43,8 +46,8 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
 def plans_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="75 RUB - Дешевый тариф", callback_data="buy:basic")],
-            [InlineKeyboardButton(text="95 RUB - Без ограничений", callback_data="buy:unlimited")],
+            [InlineKeyboardButton(text="💠 75 RUB — Дешевый тариф", callback_data="buy:basic")],
+            [InlineKeyboardButton(text="🚀 95 RUB — Без ограничений", callback_data="buy:unlimited")],
         ]
     )
 
@@ -52,7 +55,7 @@ def plans_keyboard() -> InlineKeyboardMarkup:
 def check_payment_keyboard(order_id: int, payment_url: str | None = None) -> InlineKeyboardMarkup:
     buttons = []
     if payment_url:
-        buttons.append([InlineKeyboardButton(text="Скопировать код и оплатить", url=payment_url)])
+        buttons.append([InlineKeyboardButton(text="Оплатить", url=payment_url)])
     buttons.extend(
         [
             [InlineKeyboardButton(text="Проверить оплату", callback_data=f"check_payment:{order_id}")],

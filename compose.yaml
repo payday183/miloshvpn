@@ -125,6 +125,10 @@ services:
 
   x3ui:
     image: ghcr.io/mhsanaei/3x-ui:latest
+    entrypoint:
+      - /bin/sh
+      - -c
+      - mkdir -p /var/log/xray && touch /var/log/xray/access.log && exec /app/DockerEntrypoint.sh
     restart: unless-stopped
     mem_limit: 512m
     memswap_limit: 768m
@@ -141,6 +145,7 @@ services:
     volumes:
       - x3ui-db:/etc/x-ui/
       - x3ui-cert:/root/cert/
+      - x3ui-logs:/var/log/xray/
     ports:
       - "${X3UI_PANEL_PORT:-2053}:2053"
       - "${X3UI_VLESS_PORT:-8443}:8443"
@@ -158,3 +163,4 @@ volumes:
   caddy-config:
   x3ui-db:
   x3ui-cert:
+  x3ui-logs:

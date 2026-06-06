@@ -6,7 +6,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 
 from app.config import get_settings
 
-PROFILE_AUTH_TTL_SECONDS = 15 * 60
+PROFILE_AUTH_TTL_SECONDS = 30 * 24 * 60 * 60
 TELEGRAM_LOGIN_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
