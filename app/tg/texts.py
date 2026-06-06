@@ -7,7 +7,6 @@ from app.services.vpn import TRIAL_PLAN_CODE
 
 
 def start_text(user: User, is_admin: bool, trial_created: bool = False, trial_failed: bool = False) -> str:
-    greeting = f"Привет, {escape(user.first_name)}!" if user.first_name else "Привет!"
     if trial_failed:
         trial_line = "Trial-ключ не выдался автоматически. Загляни в поддержку, поможем без паники."
     elif trial_created:
@@ -16,8 +15,8 @@ def start_text(user: User, is_admin: bool, trial_created: bool = False, trial_fa
         trial_line = "Ключ, подписка и сроки лежат в Профиле."
     admin_line = "\n\n🛠 Админка тоже рядом, отдельной кнопкой." if is_admin else ""
     return (
-        f"✨ {greeting}\n\n"
-        "Добро пожаловать в MiloshVPN. Рад видеть, будто зашёл самый лучший покупатель.\n\n"
+        f"✨ Добро пожаловать, дорогой друг!\n\n"
+        "MiloshVPN — сервис, который даст тебе доступ ко всем сервисам и белым спискам по доступным ценам.\n\n"
         f"🎁 {trial_line}\n"
         "🛒 Хочешь полный доступ — жми Купить, выбирай тариф и после оплаты нажимай Проверить оплату."
         f"{admin_line}"
