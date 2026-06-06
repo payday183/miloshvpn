@@ -67,13 +67,17 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
     amount = format_amount(required_amount)
     donate_button = (
         f"""
-        <form method="get" action="/pay/{order.id}/donate">
+        <div class="copy-row">
+          <button class="button secondary" type="button" data-copy="{escape(order.payment_code)}">Скопировать код</button>
+          <span class="copy-status" aria-live="polite"></span>
+        </div>
+        <form method="get" action="/pay/{order.id}/donate" target="_blank" rel="noopener">
           <input type="hidden" name="code" value="{escape(order.payment_code)}">
           <label>
             Email для DonationAlerts
             <input name="email" type="email" autocomplete="email" placeholder="mail@example.com">
           </label>
-          <button class="button" type="submit">Оплатить {amount} RUB</button>
+          <button class="button" type="submit" data-open-donation>Скопировать код и открыть оплату</button>
         </form>
         """
         if is_active and can_donate
@@ -129,6 +133,17 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
       form {{
         margin-top: 12px;
       }}
+      .copy-row {{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin: 0 0 14px;
+      }}
+      .copy-status {{
+        color: #116b35;
+        font-size: 13px;
+      }}
       code {{
         display: block;
         margin: 8px 0 16px;
@@ -151,6 +166,10 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
         font: inherit;
         cursor: pointer;
       }}
+      .button.secondary {{
+        background: #eef2f6;
+        color: #172033;
+      }}
       .muted {{ color: #687385; font-size: 13px; }}
     </style>
   </head>
@@ -164,8 +183,31 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
         <p>Сообщение к донату уже подготовлено:</p>
         <code>{escape(order.payment_code)}</code>
         {donate_button}
-        <p class="muted" style="margin-top: 16px;">Если DonationAlerts не подставит сообщение автоматически, вставь код из блока выше.</p>
+        <p class="muted" style="margin-top: 16px;">Страница с кодом останется открытой. Если DonationAlerts не подставит сообщение автоматически, вставь скопированный код.</p>
       </section>
     </main>
+    <script>
+      function copyPaymentCode(value) {{
+        if (!value) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {{
+          navigator.clipboard.writeText(value).catch(function () {{}});
+        }}
+      }}
+
+      document.querySelectorAll("[data-copy]").forEach(function (button) {{
+        button.addEventListener("click", function () {{
+          copyPaymentCode(button.dataset.copy);
+          var status = button.parentElement.querySelector(".copy-status");
+          if (status) status.textContent = "Скопировано";
+        }});
+      }});
+
+      document.querySelectorAll("form").forEach(function (form) {{
+        form.addEventListener("submit", function () {{
+          var code = form.querySelector("input[name='code']");
+          copyPaymentCode(code ? code.value : "");
+        }});
+      }});
+    </script>
   </body>
 </html>"""
