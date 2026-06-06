@@ -65,20 +65,27 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
     status = "Ожидает оплату" if is_active else f"Статус: {escape(order.status)}"
     plan_title = plan.title if plan is not None else order.plan_code
     amount = format_amount(required_amount)
+    payment_code = escape(order.payment_code)
+    donate_path = f"/pay/{order.id}/donate?code={payment_code}"
     donate_button = (
         f"""
-        <div class="copy-row">
-          <button class="button secondary" type="button" data-copy="{escape(order.payment_code)}">Скопировать код</button>
+        <div class="copy-grid">
+          <button class="button secondary" type="button" data-copy="{amount}">Скопировать сумму</button>
+          <button class="button secondary" type="button" data-copy="{payment_code}">Скопировать код</button>
           <span class="copy-status" aria-live="polite"></span>
         </div>
-        <form method="get" action="/pay/{order.id}/donate" target="_blank" rel="noopener">
-          <input type="hidden" name="code" value="{escape(order.payment_code)}">
+        <form method="get" action="/pay/{order.id}/donate" target="donation-frame">
+          <input type="hidden" name="code" value="{payment_code}">
           <label>
             Email для DonationAlerts
             <input name="email" type="email" autocomplete="email" placeholder="mail@example.com">
           </label>
-          <button class="button" type="submit" data-open-donation>Скопировать код и открыть оплату</button>
+          <button class="button" type="submit" data-open-donation>Открыть DonationAlerts ниже</button>
         </form>
+        <a class="button secondary fallback-link" href="{donate_path}" target="_blank" rel="noopener">Открыть DonationAlerts в отдельном окне</a>
+        <div class="frame-shell" data-frame-shell>
+          <iframe name="donation-frame" title="DonationAlerts"></iframe>
+        </div>
         """
         if is_active and can_donate
         else '<p class="muted">Ссылка DonationAlerts не настроена или заказ уже не ожидает оплату.</p>'
@@ -103,7 +110,7 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
         padding: 24px;
       }}
       section {{
-        width: min(100%, 480px);
+        width: min(100%, 920px);
         background: #fff;
         border: 1px solid #d9e0e8;
         border-radius: 8px;
@@ -133,7 +140,7 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
       form {{
         margin-top: 12px;
       }}
-      .copy-row {{
+      .copy-grid {{
         display: flex;
         align-items: center;
         gap: 10px;
@@ -143,6 +150,27 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
       .copy-status {{
         color: #116b35;
         font-size: 13px;
+      }}
+      .fallback-link {{
+        margin-top: 10px;
+      }}
+      .frame-shell {{
+        display: none;
+        margin-top: 18px;
+        border: 1px solid #d9e0e8;
+        border-radius: 8px;
+        overflow: hidden;
+        background: #fff;
+      }}
+      .frame-shell.active {{
+        display: block;
+      }}
+      iframe {{
+        display: block;
+        width: 100%;
+        min-height: 720px;
+        border: 0;
+        background: #fff;
       }}
       code {{
         display: block;
@@ -180,10 +208,10 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
         <p>{status}</p>
         <p>Тариф: <b>{escape(plan_title)}</b></p>
         <p>Проверьте, чтобы сумма была <b>{amount} RUB</b>.</p>
-        <p>Сообщение к донату уже подготовлено:</p>
-        <code>{escape(order.payment_code)}</code>
+        <p>Сообщение к донату:</p>
+        <code>{payment_code}</code>
         {donate_button}
-        <p class="muted" style="margin-top: 16px;">Страница с кодом останется открытой. Если DonationAlerts не подставит сообщение автоматически, вставь скопированный код.</p>
+        <p class="muted" style="margin-top: 16px;">Если DonationAlerts не заполнит поля сам, введи сумму и вставь код вручную. Backend засчитает только точную сумму и этот код.</p>
       </section>
     </main>
     <script>
@@ -197,7 +225,7 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
       document.querySelectorAll("[data-copy]").forEach(function (button) {{
         button.addEventListener("click", function () {{
           copyPaymentCode(button.dataset.copy);
-          var status = button.parentElement.querySelector(".copy-status");
+          var status = document.querySelector(".copy-status");
           if (status) status.textContent = "Скопировано";
         }});
       }});
@@ -206,6 +234,8 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
         form.addEventListener("submit", function () {{
           var code = form.querySelector("input[name='code']");
           copyPaymentCode(code ? code.value : "");
+          var shell = document.querySelector("[data-frame-shell]");
+          if (shell) shell.classList.add("active");
         }});
       }});
     </script>
