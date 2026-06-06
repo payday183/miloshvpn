@@ -113,6 +113,14 @@ def subscription_text(subscription: Subscription | None, key: VpnKey | None) -> 
     return text
 
 
+def payment_success_text(subscription: Subscription | None, key: VpnKey | None) -> str:
+    return (
+        "✅ Оплата прошла!\n\n"
+        "Вот ваш ключ. Спасибо за ваше доверие 💙\n\n"
+        f"{subscription_text(subscription, key)}"
+    )
+
+
 def admin_key_text(key: VpnKey) -> str:
     return (
         "Админский ключ создан без оплаты.\n\n"

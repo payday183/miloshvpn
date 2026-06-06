@@ -9,6 +9,7 @@ from app.db import SessionLocal, init_db
 from app.services.billing import poll_donations
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
 from app.services.node_monitor import refresh_all_nodes
+from app.services.payment_notifications import notify_paid_orders
 from app.services.public_keys import (
     mark_public_key_posted,
     normalize_public_key_chat_id,
@@ -26,6 +27,7 @@ DONATION_AUTH_RETRY_SECONDS = 15 * 60
 
 async def donation_loop() -> None:
     settings = get_settings()
+    bot = Bot(settings.bot_token) if settings.bot_token else None
     while True:
         sleep_seconds = settings.donationalerts_poll_interval_seconds
         async with SessionLocal() as session:
@@ -45,6 +47,13 @@ async def donation_loop() -> None:
                     logger.exception("Donation polling failed")
             except Exception:
                 logger.exception("Donation polling failed")
+        if bot is not None:
+            try:
+                notified = await notify_paid_orders(bot)
+                if notified:
+                    logger.info("Notified paid orders: %s", notified)
+            except Exception:
+                logger.exception("Paid order notifications failed")
         await asyncio.sleep(sleep_seconds)
 
 

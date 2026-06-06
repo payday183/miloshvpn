@@ -26,3 +26,16 @@ async def run_lightweight_migrations(conn: AsyncConnection) -> None:
     await conn.execute(text("ALTER TABLE vpn_nodes ADD COLUMN IF NOT EXISTS memory_percent INTEGER"))
     await conn.execute(text("ALTER TABLE vpn_nodes ADD COLUMN IF NOT EXISTS disk_percent INTEGER"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_vpn_nodes_status ON vpn_nodes (status)"))
+    await conn.execute(
+        text(
+            "DO $$ BEGIN "
+            "IF NOT EXISTS ("
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'orders' AND column_name = 'notified_at'"
+            ") THEN "
+            "ALTER TABLE orders ADD COLUMN notified_at TIMESTAMP WITH TIME ZONE; "
+            "UPDATE orders SET notified_at = paid_at WHERE status = 'paid'; "
+            "END IF; "
+            "END $$;"
+        )
+    )

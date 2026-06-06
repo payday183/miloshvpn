@@ -15,6 +15,7 @@ from app.services.admin_auth import build_admin_profile_url
 from app.services.admin_keys import create_admin_key
 from app.services.billing import create_order, poll_donations
 from app.services.payment_links import donation_url_for_order
+from app.services.payment_notifications import notify_paid_orders
 from app.services.public_keys import (
     get_active_public_key,
     mark_public_key_posted,
@@ -39,6 +40,7 @@ from app.tg.texts import (
     admin_key_text,
     instruction_text,
     payment_text,
+    payment_success_text,
     policy_text,
     plans_text,
     profile_text,
@@ -193,7 +195,7 @@ async def buy_plan(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data.startswith("check_payment:"))
-async def check_payment(callback: CallbackQuery) -> None:
+async def check_payment(callback: CallbackQuery, bot: Bot) -> None:
     order_id = int(callback.data.split(":", 1)[1])
     async with SessionLocal() as session:
         user = await get_or_create_user(
@@ -202,11 +204,6 @@ async def check_payment(callback: CallbackQuery) -> None:
             username=callback.from_user.username,
             first_name=callback.from_user.first_name,
         )
-        await session.commit()
-        try:
-            await poll_donations(session)
-        except httpx.HTTPStatusError as exc:
-            logging.warning("DonationAlerts check failed with %s", exc.response.status_code)
         order = await session.get(Order, order_id)
         if order is None:
             await callback.message.answer("Заказ не нашёлся. Лучше создай новый через Купить.")
@@ -215,14 +212,31 @@ async def check_payment(callback: CallbackQuery) -> None:
         elif order.status == "paid":
             subscription_obj = await get_active_subscription(session, user.id)
             key = await get_active_key(session, user.id)
-            await callback.message.answer(subscription_text(subscription_obj, key), parse_mode=ParseMode.HTML)
+            order.notified_at = order.notified_at or utcnow()
+            await session.commit()
+            await callback.message.answer(payment_success_text(subscription_obj, key), parse_mode=ParseMode.HTML)
         elif order.status == "pending":
+            await session.commit()
             await callback.message.answer(
-                "Пока оплату не вижу. Проверь, что в сообщении DonationAlerts был вот этот код:\n"
+                "⏳ Мы проверяем оплату.\n\n"
+                "Подождите пару минут, DonationAlerts иногда отдаёт донат не сразу.\n\n"
+                "Когда backend увидит оплату, бот автоматически пришлёт вам ключ и подписка появится в Профиле.\n\n"
+                "Проверьте, что в сообщении DonationAlerts был этот код:\n"
                 f"<code>{order.payment_code}</code>",
                 parse_mode=ParseMode.HTML,
             )
+            await callback.answer("Проверяем оплату")
+            try:
+                async with SessionLocal() as poll_session:
+                    await poll_donations(poll_session)
+                await notify_paid_orders(bot)
+            except httpx.HTTPStatusError as exc:
+                logging.warning("DonationAlerts check failed with %s", exc.response.status_code)
+            except Exception:
+                logging.exception("Payment check failed")
+            return
         else:
+            await session.commit()
             await callback.message.answer(f"Статус заказа: {order.status}")
     await callback.answer()
 
