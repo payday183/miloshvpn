@@ -28,7 +28,8 @@ async def payment_page(
 
     required_amount = await required_order_amount(session, order)
     plan = await session.get(Plan, order.plan_code)
-    return HTMLResponse(render_payment_page(order, plan, bool(donation_url_for_order(order, required_amount)), required_amount))
+    donation_url = donation_url_for_order(order, required_amount)
+    return HTMLResponse(render_payment_page(order, plan, donation_url, required_amount))
 
 
 @router.get("/pay/{order_id}/donate")
@@ -53,16 +54,15 @@ def require_payment_code(order: Order, code: str) -> None:
         raise HTTPException(status_code=404, detail="Order not found")
 
 
-def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, required_amount) -> str:
+def render_payment_page(order: Order, plan: Plan | None, donation_url: str, required_amount) -> str:
     is_active = order.status == "pending" and order.expires_at > utcnow()
     status = "Ожидает оплату" if is_active else f"Статус: {escape(order.status)}"
     plan_title = plan.title if plan is not None else order.plan_code
     amount = format_amount(required_amount)
     payment_code = escape(order.payment_code)
-    donate_path = f"/pay/{order.id}/donate?code={payment_code}"
-    can_open_donation = is_active and can_donate
+    can_open_donation = is_active and bool(donation_url)
     donate_button = (
-        '<button class="button" type="button" data-donation-button>Скопировать код и открыть DonationAlerts</button>'
+        f'<a class="button" href="{escape(donation_url)}" rel="noopener" data-donation-link>Скопировать код и открыть DonationAlerts</a>'
         if can_open_donation
         else '<p class="muted">Ссылка DonationAlerts не настроена или заказ уже не ожидает оплату.</p>'
     )
@@ -70,7 +70,6 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
         f"""
     <script>
       const paymentCode = {json.dumps(order.payment_code)};
-      const donationUrl = {json.dumps(donate_path)};
 
       function copyPaymentCode() {{
         if (navigator.clipboard && navigator.clipboard.writeText) {{
@@ -87,19 +86,14 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
             if (status) status.textContent = "Код скопирован, открываю DonationAlerts...";
           }})
           .catch(function () {{
-            if (status) status.textContent = "Открываю DonationAlerts. Если буфер не сработал, код виден на этой странице.";
-          }})
-          .finally(function () {{
-            window.setTimeout(function () {{
-              window.location.href = donationUrl;
-            }}, 250);
+            if (status) status.textContent = "Если буфер не сработал, код виден на этой странице.";
           }});
       }}
 
       window.addEventListener("DOMContentLoaded", function () {{
-        const button = document.querySelector("[data-donation-button]");
-        if (button) {{
-          button.addEventListener("click", openDonationAlerts);
+        const link = document.querySelector("[data-donation-link]");
+        if (link) {{
+          link.addEventListener("click", openDonationAlerts);
         }}
       }});
     </script>
