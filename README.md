@@ -197,13 +197,14 @@ The worker rotates the public key every 24 hours.
 ```env
 PUBLIC_KEY_ENABLED=true
 PUBLIC_KEY_ROTATE_HOURS=24
+PUBLIC_KEY_TRAFFIC_GB=500
 PUBLIC_KEY_CHAT_ID=
 NODE_STATUS_POLL_INTERVAL_SECONDS=60
 EXPIRED_SUBSCRIPTION_CLEANUP_ENABLED=true
 EXPIRED_SUBSCRIPTION_CLEANUP_INTERVAL_SECONDS=300
 ```
 
-If `PUBLIC_KEY_CHAT_ID` is set, the worker posts the new free key into that Telegram chat/channel. The bot must be an admin in the target channel. The public post text includes the free VLESS key in a copyable block.
+If `PUBLIC_KEY_CHAT_ID` is set, the worker posts the new free key into that Telegram chat/channel. It accepts `@channel`, a numeric chat ID, or a public `https://t.me/channel` link. The bot must be an admin in the target channel. The public post text includes the free VLESS key in a copyable block and is selected from seeded templates.
 
 Expired paid subscriptions are cleaned automatically. The worker marks them as expired, deletes the private VPN client from 3x-ui, and keeps the Telegram user/payment history in PostgreSQL.
 

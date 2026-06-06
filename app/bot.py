@@ -15,7 +15,14 @@ from app.services.admin_auth import build_admin_profile_url
 from app.services.admin_keys import create_admin_key
 from app.services.billing import create_order, poll_donations
 from app.services.payment_links import donation_url_for_order
-from app.services.public_keys import get_active_public_key, public_key_post_text, rotate_public_key
+from app.services.public_keys import (
+    get_active_public_key,
+    mark_public_key_posted,
+    normalize_public_key_chat_id,
+    public_key_channel_post_text,
+    public_key_post_text,
+    rotate_public_key,
+)
 from app.services.stats import collect_stats
 from app.services.users import add_admin, get_or_create_user, is_admin
 from app.services.vpn import (
@@ -346,13 +353,16 @@ async def post_free(message: Message, bot: Bot) -> None:
     if not admin:
         return
     settings = get_settings()
-    if not settings.public_key_chat_id:
+    chat_id = normalize_public_key_chat_id(settings.public_key_chat_id)
+    if not chat_id:
         await message.answer("PUBLIC_KEY_CHAT_ID не задан в .env.", reply_markup=kb.admin_keyboard())
         return
     async with SessionLocal() as session:
         key = await get_active_public_key(session) or await rotate_public_key(session)
-    await bot.send_message(settings.public_key_chat_id, public_key_post_text(key), parse_mode=ParseMode.HTML)
-    await message.answer("Бесплатный ключ опубликован.", reply_markup=kb.admin_keyboard())
+        text = await public_key_channel_post_text(session, key)
+        await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML)
+        await mark_public_key_posted(session)
+    await message.answer(f"Бесплатный ключ опубликован в {chat_id}.", reply_markup=kb.admin_keyboard())
 
 
 @router.message(Command("add_admin"))

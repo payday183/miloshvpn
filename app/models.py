@@ -143,6 +143,18 @@ class BotAdmin(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class PublicKeyPostTemplate(Base):
+    __tablename__ = "public_key_post_templates"
+    __table_args__ = (UniqueConstraint("code", name="uq_public_key_post_templates_code"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    body: Mapped[str] = mapped_column(Text)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Setting(Base):
     __tablename__ = "settings"
     __table_args__ = (UniqueConstraint("key", name="uq_settings_key"),)

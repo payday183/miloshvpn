@@ -9,8 +9,13 @@ from app.db import SessionLocal, init_db
 from app.services.billing import poll_donations
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
 from app.services.node_monitor import refresh_all_nodes
-from app.services.public_keys import get_active_public_key, public_key_post_text, rotate_public_key
-from app.timeutils import utcnow
+from app.services.public_keys import (
+    mark_public_key_posted,
+    normalize_public_key_chat_id,
+    public_key_channel_post_text,
+    rotate_public_key,
+    seconds_until_next_public_key_post,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,27 +50,32 @@ async def donation_loop() -> None:
 
 async def public_key_loop() -> None:
     settings = get_settings()
-    bot = Bot(settings.bot_token) if settings.bot_token and settings.public_key_chat_id else None
+    chat_id = normalize_public_key_chat_id(settings.public_key_chat_id)
+    bot = Bot(settings.bot_token) if settings.bot_token and chat_id else None
+    if settings.public_key_enabled and bot is None:
+        logger.warning("Public key posting is enabled, but BOT_TOKEN or PUBLIC_KEY_CHAT_ID is empty")
+
     while True:
+        sleep_seconds = 300
         if settings.public_key_enabled:
             async with SessionLocal() as session:
                 try:
-                    key = await get_active_public_key(session)
-                    should_rotate = key is None or (
-                        key.expires_at is not None and key.expires_at <= utcnow()
-                    )
-                    if should_rotate:
-                        key = await rotate_public_key(session)
-                        logger.info("Rotated public VPN key: %s", key.email)
-                        if bot is not None:
-                            await bot.send_message(
-                                settings.public_key_chat_id,
-                                public_key_post_text(key),
-                                parse_mode="HTML",
-                            )
+                    seconds_left = await seconds_until_next_public_key_post(session)
+                    if seconds_left <= 0:
+                        if bot is None:
+                            logger.warning("Skipping public key post because Telegram target is not configured")
+                        else:
+                            key = await rotate_public_key(session)
+                            text = await public_key_channel_post_text(session, key)
+                            await bot.send_message(chat_id, text, parse_mode="HTML")
+                            await mark_public_key_posted(session)
+                            logger.info("Published public VPN key: %s", key.email)
+                            sleep_seconds = max(60, settings.public_key_rotate_hours * 60 * 60)
+                    else:
+                        sleep_seconds = max(60, seconds_left)
                 except Exception:
                     logger.exception("Public key rotation failed")
-        await asyncio.sleep(300)
+        await asyncio.sleep(sleep_seconds)
 
 
 async def node_status_loop() -> None:

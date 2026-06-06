@@ -43,6 +43,7 @@ class Settings(BaseSettings):
 
     public_key_enabled: bool = True
     public_key_rotate_hours: int = 24
+    public_key_traffic_gb: int = 500
     public_key_chat_id: str = ""
     free_trial_enabled: bool = True
     free_trial_days: int = 7

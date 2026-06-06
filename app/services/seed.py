@@ -4,7 +4,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import BotAdmin, Plan, VpnNode
+from app.models import BotAdmin, Plan, PublicKeyPostTemplate, VpnNode
 from app.timeutils import utcnow
 
 
@@ -28,6 +28,120 @@ DEFAULT_PLANS = [
 ]
 
 TRIAL_PLAN_CODE = "trial"
+
+PUBLIC_KEY_POST_TEMPLATES = [
+    {
+        "code": "free_key_01",
+        "title": "Свежий ключ на столе",
+        "body": (
+            "🔥 Свежий бесплатный ключ MiloshVPN уже на столе.\n\n"
+            "Забирай, тестируй Telegram, YouTube, Instagram и обычные сайты.\n\n"
+            "{key_block}\n\n"
+            "⏳ Живёт до: {expires}\n\n"
+            "📦 Лимит: {traffic_gb} ГБ\n\n"
+            "Через {hours} ч ключ заменится автоматически."
+        ),
+    },
+    {
+        "code": "free_key_02",
+        "title": "Интернет без лишних танцев",
+        "body": (
+            "⚡ MiloshVPN подкинул бесплатный VLESS на сегодня.\n\n"
+            "Без лишних танцев: скопировал, вставил в клиент, подключился.\n\n"
+            "{key_block}\n\n"
+            "⏳ До: {expires}\n\n"
+            "📦 Трафик: {traffic_gb} ГБ"
+        ),
+    },
+    {
+        "code": "free_key_03",
+        "title": "Проверочный вход",
+        "body": (
+            "😎 Дорогой друг, вот бесплатный вход в MiloshVPN на сутки.\n\n"
+            "Можно спокойно проверить скорость и белые списки.\n\n"
+            "{key_block}\n\n"
+            "⏳ Активен до: {expires}\n\n"
+            "📦 Лимит: {traffic_gb} ГБ"
+        ),
+    },
+    {
+        "code": "free_key_04",
+        "title": "Ключ дня",
+        "body": (
+            "🚀 Ключ дня подъехал.\n\n"
+            "Берёшь VLESS, импортируешь в клиент и смотришь, как интернет становится приятнее.\n\n"
+            "{key_block}\n\n"
+            "⏳ Работает до: {expires}\n\n"
+            "📦 Лимит на сутки: {traffic_gb} ГБ"
+        ),
+    },
+    {
+        "code": "free_key_05",
+        "title": "Без душноты",
+        "body": (
+            "✨ Бесплатный MiloshVPN без душноты и длинных инструкций.\n\n"
+            "Ключ ниже, копируй целиком:\n\n"
+            "{key_block}\n\n"
+            "⏳ До: {expires}\n\n"
+            "📦 {traffic_gb} ГБ на тест"
+        ),
+    },
+    {
+        "code": "free_key_06",
+        "title": "Суточный тест",
+        "body": (
+            "🛡 Суточный тест MiloshVPN открыт.\n\n"
+            "Подключайся и проверяй нужные сервисы без лишней суеты.\n\n"
+            "{key_block}\n\n"
+            "⏳ Финиш: {expires}\n\n"
+            "📦 Лимит: {traffic_gb} ГБ"
+        ),
+    },
+    {
+        "code": "free_key_07",
+        "title": "Подарок каналу",
+        "body": (
+            "🎁 Подарок каналу: бесплатный VLESS-ключ на 24 часа.\n\n"
+            "Если давно хотел попробовать MiloshVPN, сейчас самое время.\n\n"
+            "{key_block}\n\n"
+            "⏳ До: {expires}\n\n"
+            "📦 Трафик: {traffic_gb} ГБ"
+        ),
+    },
+    {
+        "code": "free_key_08",
+        "title": "Спокойный доступ",
+        "body": (
+            "💎 Бесплатный ключ MiloshVPN готов.\n\n"
+            "Для тех, кто хочет просто нормальный доступ, без странных плясок вокруг интернета.\n\n"
+            "{key_block}\n\n"
+            "⏳ Действует до: {expires}\n\n"
+            "📦 Лимит: {traffic_gb} ГБ"
+        ),
+    },
+    {
+        "code": "free_key_09",
+        "title": "Проверка связи",
+        "body": (
+            "📡 Проверка связи: новый бесплатный ключ уже здесь.\n\n"
+            "Копируй VLESS, импортируй в клиент и погнали.\n\n"
+            "{key_block}\n\n"
+            "⏳ До: {expires}\n\n"
+            "📦 На сегодня: {traffic_gb} ГБ"
+        ),
+    },
+    {
+        "code": "free_key_10",
+        "title": "Красивый тест",
+        "body": (
+            "🌙 На сегодня у нас красивый тест MiloshVPN.\n\n"
+            "Ключ живёт сутки, лимит щедрый, дальше система сама заменит его новым.\n\n"
+            "{key_block}\n\n"
+            "⏳ До: {expires}\n\n"
+            "📦 Лимит: {traffic_gb} ГБ"
+        ),
+    },
+]
 
 
 async def seed_defaults(session: AsyncSession) -> None:
@@ -68,9 +182,20 @@ async def seed_defaults(session: AsyncSession) -> None:
         if existing is None:
             session.add(BotAdmin(telegram_id=telegram_id, added_at=utcnow()))
 
+    now = utcnow()
+    for payload in PUBLIC_KEY_POST_TEMPLATES:
+        template = await session.scalar(
+            select(PublicKeyPostTemplate).where(PublicKeyPostTemplate.code == payload["code"])
+        )
+        if template is None:
+            session.add(PublicKeyPostTemplate(**payload, is_active=True, created_at=now))
+        else:
+            template.title = payload["title"]
+            template.body = payload["body"]
+            template.is_active = True
+
     node_count = await session.scalar(select(func.count()).select_from(VpnNode))
     if not node_count:
-        now = utcnow()
         session.add(
             VpnNode(
                 title="Local test 3x-ui",
