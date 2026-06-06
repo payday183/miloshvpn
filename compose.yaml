@@ -21,8 +21,6 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-milosh}:${POSTGRES_PASSWORD:-milosh_password}@postgres:5432/${POSTGRES_DB:-miloshvpn}
       REDIS_URL: redis://redis:6379/0
       X3UI_BASE_URL: http://x3ui:2053
-    ports:
-      - "${APP_PORT:-8080}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -34,6 +32,24 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    mem_limit: 128m
+    memswap_limit: 192m
+    pids_limit: 64
+    logging: *default-logging
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
 
   bot:
     image: miloshvpn-api:local
@@ -138,5 +154,7 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  caddy-data:
+  caddy-config:
   x3ui-db:
   x3ui-cert:
