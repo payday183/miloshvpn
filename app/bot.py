@@ -23,6 +23,7 @@ from app.services.public_keys import (
     public_key_post_text,
     rotate_public_key,
 )
+from app.services.seed import ADMIN_TEST_PLAN_CODE
 from app.services.stats import collect_stats
 from app.services.users import add_admin, get_or_create_user, is_admin
 from app.services.vpn import (
@@ -49,6 +50,12 @@ from app.timeutils import utcnow
 
 logging.basicConfig(level=logging.INFO)
 router = Router()
+
+
+def visible_purchase_plans(plans: list[Plan], admin: bool) -> list[Plan]:
+    if admin:
+        return plans
+    return [plan for plan in plans if plan.code != ADMIN_TEST_PLAN_CODE]
 
 
 async def current_user(message: Message):
@@ -120,17 +127,39 @@ async def subscription(message: Message) -> None:
 
 @router.message((F.text == kb.BUY) | (F.text == "Купить пакет") | (F.text == kb.EXTEND))
 async def buy(message: Message) -> None:
-    await current_user(message)
+    _, admin = await current_user(message)
     async with SessionLocal() as session:
-        plans = (await session.scalars(select(Plan).where(Plan.is_active.is_(True)))).all()
-    await message.answer(plans_text(list(plans)), reply_markup=kb.plans_keyboard(), parse_mode=ParseMode.HTML)
+        plans = (
+            await session.scalars(select(Plan).where(Plan.is_active.is_(True)).order_by(Plan.price_rub.asc()))
+        ).all()
+    visible_plans = visible_purchase_plans(list(plans), admin)
+    await message.answer(
+        plans_text(visible_plans),
+        reply_markup=kb.plans_keyboard(include_admin_test=admin),
+        parse_mode=ParseMode.HTML,
+    )
 
 
 @router.callback_query(F.data == "show_plans")
 async def show_plans(callback: CallbackQuery) -> None:
     async with SessionLocal() as session:
-        plans = (await session.scalars(select(Plan).where(Plan.is_active.is_(True)))).all()
-    await callback.message.answer(plans_text(list(plans)), reply_markup=kb.plans_keyboard(), parse_mode=ParseMode.HTML)
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        admin = await is_admin(session, user.telegram_id)
+        plans = (
+            await session.scalars(select(Plan).where(Plan.is_active.is_(True)).order_by(Plan.price_rub.asc()))
+        ).all()
+        await session.commit()
+    visible_plans = visible_purchase_plans(list(plans), admin)
+    await callback.message.answer(
+        plans_text(visible_plans),
+        reply_markup=kb.plans_keyboard(include_admin_test=admin),
+        parse_mode=ParseMode.HTML,
+    )
     await callback.answer()
 
 
@@ -144,8 +173,17 @@ async def buy_plan(callback: CallbackQuery) -> None:
             username=callback.from_user.username,
             first_name=callback.from_user.first_name,
         )
-        order = await create_order(session, user, plan_code)
+        admin = await is_admin(session, user.telegram_id)
+        if plan_code == ADMIN_TEST_PLAN_CODE and not admin:
+            await session.commit()
+            await callback.answer("Тестовый тариф доступен только админам.", show_alert=True)
+            return
         plan = await session.get(Plan, plan_code)
+        if plan is None or not plan.is_active:
+            await session.commit()
+            await callback.answer("Тариф недоступен.", show_alert=True)
+            return
+        order = await create_order(session, user, plan_code)
     await callback.message.answer(
         payment_text(order, plan),
         reply_markup=kb.check_payment_keyboard(order.id, donation_url_for_order(order)),

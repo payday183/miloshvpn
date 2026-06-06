@@ -43,12 +43,15 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def plans_keyboard() -> InlineKeyboardMarkup:
+def plans_keyboard(include_admin_test: bool = False) -> InlineKeyboardMarkup:
+    keyboard = [
+        [InlineKeyboardButton(text="💠 75 RUB — Базовый тариф", callback_data="buy:basic")],
+        [InlineKeyboardButton(text="🚀 95 RUB — Без ограничений", callback_data="buy:unlimited")],
+    ]
+    if include_admin_test:
+        keyboard.append([InlineKeyboardButton(text="🧪 10 RUB — Тестовый тариф", callback_data="buy:admin_test")])
     return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="💠 75 RUB — Базовый тариф", callback_data="buy:basic")],
-            [InlineKeyboardButton(text="🚀 95 RUB — Без ограничений", callback_data="buy:unlimited")],
-        ]
+        inline_keyboard=keyboard
     )
 
 

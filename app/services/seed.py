@@ -25,9 +25,18 @@ DEFAULT_PLANS = [
         "days": 30,
         "traffic_gb": None,
     },
+    {
+        "code": "admin_test",
+        "title": "Тестовый тариф",
+        "description": "Админская проверка оплаты: 10 RUB, 1 день, лимит 10 ГБ.",
+        "price_rub": Decimal("10.00"),
+        "days": 1,
+        "traffic_gb": 10,
+    },
 ]
 
 TRIAL_PLAN_CODE = "trial"
+ADMIN_TEST_PLAN_CODE = "admin_test"
 
 PUBLIC_KEY_POST_TEMPLATES = [
     {
