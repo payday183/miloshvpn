@@ -113,7 +113,7 @@ async def buy_plan(callback: CallbackQuery) -> None:
         plan = await session.get(Plan, plan_code)
     await callback.message.answer(
         payment_text(order, plan),
-        reply_markup=kb.check_payment_keyboard(order.id, payment_page_url(order.id)),
+        reply_markup=kb.check_payment_keyboard(order.id, payment_page_url(order)),
         parse_mode=ParseMode.HTML,
     )
     await callback.answer()

@@ -36,14 +36,13 @@ def plans_text(plans: list[Plan]) -> str:
 
 
 def payment_text(order: Order, plan: Plan) -> str:
-    payment_url = escape(payment_page_url(order.id))
     required_amount = max(Decimal(order.amount_rub), Decimal(plan.price_rub))
     return (
         "Заказ создан.\n\n"
         f"Тариф: {escape(plan.title)}\n"
         f"Проверьте, чтобы сумма была <b>{format_price(required_amount)} RUB</b>.\n"
-        f"Код оплаты: <code>{order.payment_code}</code>\n\n"
-        f'<a href="{payment_url}">Открыть страницу оплаты</a>\n\n'
+        f'<a href="{escape(payment_page_url(order))}">Открыть страницу оплаты</a>\n\n'
+        "На странице уже будет готовое сообщение к донату.\n"
         "После оплаты нажми <b>Проверить оплату</b>."
     )
 

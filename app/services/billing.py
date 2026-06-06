@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 import logging
 import re
 import secrets
@@ -15,9 +16,15 @@ from app.models import DonationEvent, Order, Plan, User
 from app.services.vpn import create_or_extend_subscription
 from app.timeutils import utcnow
 
-CODE_PATTERN = re.compile(r"MILO-[0-9]+-[A-Z0-9]{5,8}")
+CODE_PATTERN = re.compile(r"\bMILO-(?P<telegram_id>[0-9]+)-(?P<secret>[A-Z0-9]{5,8})\b")
 DONATIONALERTS_PAGE_DELAY_SECONDS = 1.0
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class PaymentCode:
+    value: str
+    telegram_id: int
 
 
 async def create_order(session: AsyncSession, user: User, plan_code: str) -> Order:
@@ -149,7 +156,7 @@ async def process_donation(session: AsyncSession, donation: dict[str, Any]) -> b
 
     message = str(donation.get("message") or "")
     username = str(donation.get("username") or donation.get("name") or "")
-    amount = Decimal(str(donation.get("amount") or donation.get("amount_in_user_currency") or "0"))
+    amount = donation_amount(donation)
     currency = str(donation.get("currency") or donation.get("currency_code") or "RUB").upper()
 
     event = DonationEvent(
@@ -163,11 +170,15 @@ async def process_donation(session: AsyncSession, donation: dict[str, Any]) -> b
     )
     session.add(event)
 
-    payment_code = extract_payment_code(message) or extract_payment_code(username)
+    payment_code = parse_payment_code(message) or parse_payment_code(username)
     if payment_code is None:
         return True
 
-    order = await session.scalar(select(Order).where(Order.payment_code == payment_code, Order.status == "pending"))
+    order = await session.scalar(
+        select(Order)
+        .where(Order.payment_code == payment_code.value, Order.status == "pending")
+        .with_for_update()
+    )
     if order is None:
         return True
 
@@ -178,12 +189,28 @@ async def process_donation(session: AsyncSession, donation: dict[str, Any]) -> b
     if currency not in {"RUB", "RUR"}:
         return True
 
-    required_amount = await required_order_amount(session, order)
-    if amount < required_amount:
-        return True
-
     user = await session.get(User, order.user_id)
     if user is None:
+        return True
+
+    if user.telegram_id != payment_code.telegram_id:
+        logger.warning(
+            "Donation code Telegram ID mismatch: code=%s order_user=%s external_id=%s",
+            payment_code.telegram_id,
+            user.telegram_id,
+            external_id,
+        )
+        return True
+
+    required_amount = await required_order_amount(session, order)
+    if amount < required_amount:
+        logger.warning(
+            "Donation amount is too low for order %s: amount=%s required=%s external_id=%s",
+            order.id,
+            amount,
+            required_amount,
+            external_id,
+        )
         return True
 
     order.status = "paid"
@@ -201,8 +228,18 @@ async def required_order_amount(session: AsyncSession, order: Order) -> Decimal:
     return required
 
 
-def extract_payment_code(text: str) -> str | None:
+def donation_amount(donation: dict[str, Any]) -> Decimal:
+    raw_amount = donation.get("amount") or donation.get("amount_in_user_currency") or "0"
+    return Decimal(str(raw_amount).replace(",", "."))
+
+
+def parse_payment_code(text: str) -> PaymentCode | None:
     match = CODE_PATTERN.search(text.upper())
     if match is None:
         return None
-    return match.group(0)
+    return PaymentCode(value=match.group(0), telegram_id=int(match.group("telegram_id")))
+
+
+def extract_payment_code(text: str) -> str | None:
+    payment_code = parse_payment_code(text)
+    return payment_code.value if payment_code else None
