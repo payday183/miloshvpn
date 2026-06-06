@@ -1,4 +1,5 @@
 from html import escape
+import json
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -67,28 +68,53 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
     amount = format_amount(required_amount)
     payment_code = escape(order.payment_code)
     donate_path = f"/pay/{order.id}/donate?code={payment_code}"
-    donate_button = (
-        f"""
-        <div class="copy-grid">
-          <button class="button secondary" type="button" data-copy="{amount}">Скопировать сумму</button>
-          <button class="button secondary" type="button" data-copy="{payment_code}">Скопировать код</button>
-          <span class="copy-status" aria-live="polite"></span>
-        </div>
-        <form method="get" action="/pay/{order.id}/donate" target="donation-frame">
-          <input type="hidden" name="code" value="{payment_code}">
-          <label>
-            Email для DonationAlerts
-            <input name="email" type="email" autocomplete="email" placeholder="mail@example.com">
-          </label>
-          <button class="button" type="submit" data-open-donation>Открыть DonationAlerts ниже</button>
-        </form>
-        <a class="button secondary fallback-link" href="{donate_path}" target="_blank" rel="noopener">Открыть DonationAlerts в отдельном окне</a>
-        <div class="frame-shell" data-frame-shell>
-          <iframe name="donation-frame" title="DonationAlerts"></iframe>
-        </div>
-        """
-        if is_active and can_donate
+    can_open_donation = is_active and can_donate
+    donate_link = (
+        f'<a class="button" href="{donate_path}" rel="nofollow">Открыть DonationAlerts</a>'
+        if can_open_donation
         else '<p class="muted">Ссылка DonationAlerts не настроена или заказ уже не ожидает оплату.</p>'
+    )
+    redirect_script = (
+        f"""
+    <script>
+      const paymentCode = {json.dumps(order.payment_code)};
+      const donationUrl = {json.dumps(donate_path)};
+      const redirectKey = "milosh-pay-opened-" + {json.dumps(order.id)} + "-" + paymentCode;
+
+      function copyPaymentCode() {{
+        if (navigator.clipboard && navigator.clipboard.writeText) {{
+          return navigator.clipboard.writeText(paymentCode);
+        }}
+        return Promise.reject();
+      }}
+
+      function openDonationAlerts() {{
+        const status = document.querySelector("[data-status]");
+        const opened = window.sessionStorage && sessionStorage.getItem(redirectKey);
+        if (opened) {{
+          if (status) status.textContent = "DonationAlerts уже открывался. Код оставлен здесь, если поле сообщения пустое.";
+          return;
+        }}
+        if (window.sessionStorage) sessionStorage.setItem(redirectKey, "1");
+        copyPaymentCode()
+          .then(function () {{
+            if (status) status.textContent = "Код скопирован. Открываю DonationAlerts...";
+          }})
+          .catch(function () {{
+            if (status) status.textContent = "Открываю DonationAlerts. Если сообщение пустое, вставь код с этой страницы.";
+          }})
+          .finally(function () {{
+            window.setTimeout(function () {{
+              window.location.href = donationUrl;
+            }}, 550);
+          }});
+      }}
+
+      window.addEventListener("DOMContentLoaded", openDonationAlerts);
+    </script>
+        """
+        if can_open_donation
+        else ""
     )
     return f"""<!doctype html>
 <html lang="ru">
@@ -110,7 +136,7 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
         padding: 24px;
       }}
       section {{
-        width: min(100%, 920px);
+        width: min(100%, 560px);
         background: #fff;
         border: 1px solid #d9e0e8;
         border-radius: 8px;
@@ -123,55 +149,6 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
         letter-spacing: 0;
       }}
       p {{ margin: 0 0 14px; }}
-      label {{
-        display: grid;
-        gap: 7px;
-        margin: 12px 0;
-        color: #394252;
-        font-size: 14px;
-      }}
-      input {{
-        min-height: 42px;
-        border: 1px solid #cfd7e2;
-        border-radius: 6px;
-        padding: 0 12px;
-        font: inherit;
-      }}
-      form {{
-        margin-top: 12px;
-      }}
-      .copy-grid {{
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
-        margin: 0 0 14px;
-      }}
-      .copy-status {{
-        color: #116b35;
-        font-size: 13px;
-      }}
-      .fallback-link {{
-        margin-top: 10px;
-      }}
-      .frame-shell {{
-        display: none;
-        margin-top: 18px;
-        border: 1px solid #d9e0e8;
-        border-radius: 8px;
-        overflow: hidden;
-        background: #fff;
-      }}
-      .frame-shell.active {{
-        display: block;
-      }}
-      iframe {{
-        display: block;
-        width: 100%;
-        min-height: 720px;
-        border: 0;
-        background: #fff;
-      }}
       code {{
         display: block;
         margin: 8px 0 16px;
@@ -194,11 +171,8 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
         font: inherit;
         cursor: pointer;
       }}
-      .button.secondary {{
-        background: #eef2f6;
-        color: #172033;
-      }}
       .muted {{ color: #687385; font-size: 13px; }}
+      .status {{ color: #116b35; }}
     </style>
   </head>
   <body>
@@ -210,34 +184,11 @@ def render_payment_page(order: Order, plan: Plan | None, can_donate: bool, requi
         <p>Проверьте, чтобы сумма была <b>{amount} RUB</b>.</p>
         <p>Сообщение к донату:</p>
         <code>{payment_code}</code>
-        {donate_button}
-        <p class="muted" style="margin-top: 16px;">Если DonationAlerts не заполнит поля сам, введи сумму и вставь код вручную. Backend засчитает только точную сумму и этот код.</p>
+        <p class="status" data-status>Открываю DonationAlerts...</p>
+        {donate_link}
+        <p class="muted" style="margin-top: 16px;">Backend засчитает оплату только с этой суммой и этим кодом.</p>
       </section>
     </main>
-    <script>
-      function copyPaymentCode(value) {{
-        if (!value) return;
-        if (navigator.clipboard && navigator.clipboard.writeText) {{
-          navigator.clipboard.writeText(value).catch(function () {{}});
-        }}
-      }}
-
-      document.querySelectorAll("[data-copy]").forEach(function (button) {{
-        button.addEventListener("click", function () {{
-          copyPaymentCode(button.dataset.copy);
-          var status = document.querySelector(".copy-status");
-          if (status) status.textContent = "Скопировано";
-        }});
-      }});
-
-      document.querySelectorAll("form").forEach(function (form) {{
-        form.addEventListener("submit", function () {{
-          var code = form.querySelector("input[name='code']");
-          copyPaymentCode(code ? code.value : "");
-          var shell = document.querySelector("[data-frame-shell]");
-          if (shell) shell.classList.add("active");
-        }});
-      }});
-    </script>
+    {redirect_script}
   </body>
 </html>"""
