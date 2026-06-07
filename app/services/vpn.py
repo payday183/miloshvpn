@@ -108,6 +108,9 @@ async def revoke_private_key(session: AsyncSession, key_id: int) -> VpnKey | Non
 async def create_private_key(session: AsyncSession, user: User, subscription: Subscription) -> VpnKey:
     settings = get_settings()
     node = await select_node_for_key(session)
+    if node is None and settings.x3ui_mode != "mock":
+        raise RuntimeError("No available VPN node for private key")
+
     node_id = node.id if node is not None else None
     max_clients = node.max_clients if node is not None else settings.x3ui_max_clients
     existing_key = await get_active_key(session, user.id)

@@ -61,7 +61,7 @@ async def select_node_for_key(session: AsyncSession) -> VpnNode | None:
         candidates.append((score, node))
 
     if not candidates:
-        return await get_active_node(session)
+        return None
 
     return min(candidates, key=lambda item: (item[0], item[1].id))[1]
 
