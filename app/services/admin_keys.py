@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import User, VpnKey
-from app.services.nodes import select_node_for_key
+from app.services.nodes import select_admin_node
 from app.services.x3ui import X3UIClient
 from app.timeutils import utcnow
 
@@ -12,7 +12,10 @@ from app.timeutils import utcnow
 async def create_admin_key(session: AsyncSession, user: User) -> VpnKey:
     settings = get_settings()
     now = utcnow()
-    node = await select_node_for_key(session)
+    node = await select_admin_node(session)
+    if node is None and settings.x3ui_mode != "mock":
+        raise RuntimeError("No available VPN node for admin key")
+
     label = f"milosh_admin_{user.telegram_id}_{secrets.token_hex(3)}"
     client = await X3UIClient(settings, node=node).create_client(
         email=label,

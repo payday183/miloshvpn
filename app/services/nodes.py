@@ -15,6 +15,17 @@ async def get_active_node(session: AsyncSession) -> VpnNode | None:
     return await session.scalar(select(VpnNode).where(VpnNode.is_active.is_(True)).order_by(VpnNode.id))
 
 
+async def select_admin_node(session: AsyncSession) -> VpnNode | None:
+    nodes = (
+        await session.scalars(
+            select(VpnNode)
+            .where(VpnNode.status != "offline")
+            .order_by(VpnNode.is_active.asc(), VpnNode.id)
+        )
+    ).all()
+    return nodes[0] if nodes else None
+
+
 async def select_node_for_key(session: AsyncSession) -> VpnNode | None:
     settings = get_settings()
     if settings.node_selection_mode == "active":
