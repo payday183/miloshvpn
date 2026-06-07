@@ -39,8 +39,6 @@ async def select_node_for_key(session: AsyncSession) -> VpnNode | None:
             continue
         if node.status == "offline":
             continue
-        if is_overloaded(node):
-            continue
 
         load_ratio = active_keys / max(node.max_clients, 1)
         remote_ratio = node.remote_enabled_clients / max(node.max_clients, 1)
@@ -49,6 +47,7 @@ async def select_node_for_key(session: AsyncSession) -> VpnNode | None:
         disk = (node.disk_percent or 0) / 100
         latency = min(node.last_latency_ms or 0, 5000) / 5000
         unknown_penalty = 0.15 if node.status == "unknown" else 0
+        overload_penalty = 1.0 if is_overloaded(node) else 0
         score = (
             load_ratio * 0.35
             + remote_ratio * 0.2
@@ -57,6 +56,7 @@ async def select_node_for_key(session: AsyncSession) -> VpnNode | None:
             + disk * 0.05
             + latency * 0.05
             + unknown_penalty
+            + overload_penalty
         )
         candidates.append((score, node))
 
