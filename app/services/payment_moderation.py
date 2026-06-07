@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import BotAdmin, Order, Subscription, User, VpnKey
+from app.services.payment_modes import MODERATED_PAYMENT_PROVIDERS
 from app.services.vpn import create_or_extend_subscription, get_active_key, get_active_subscription
 from app.services.x3ui import X3UIClient
 from app.timeutils import utcnow
@@ -65,7 +66,11 @@ async def list_pending_review_orders(session: AsyncSession, *, limit: int = 200)
             await session.scalars(
                 select(Order)
                 .options(selectinload(Order.user), selectinload(Order.plan))
-                .where(Order.status == "provisional", Order.moderation_status == "pending_review")
+                .where(
+                    Order.status == "provisional",
+                    Order.moderation_status == "pending_review",
+                    Order.payment_provider.in_(MODERATED_PAYMENT_PROVIDERS),
+                )
                 .order_by(Order.paid_at.asc(), Order.created_at.asc())
                 .limit(limit)
             )
@@ -82,6 +87,8 @@ async def grant_provisional_access(session: AsyncSession, order_id: int) -> Mode
     )
     if order is None or order.user is None:
         raise RuntimeError("Заказ не найден")
+    if order.payment_provider not in MODERATED_PAYMENT_PROVIDERS:
+        raise RuntimeError("Ручная проверка доступна только для ручной SBP и гибридной оплаты")
 
     if order.status == "paid":
         subscription = await get_active_subscription(session, order.user_id)
@@ -112,6 +119,8 @@ async def confirm_moderated_order(session: AsyncSession, order_id: int) -> Moder
     )
     if order is None:
         raise RuntimeError("Заказ не найден")
+    if order.payment_provider not in MODERATED_PAYMENT_PROVIDERS:
+        raise RuntimeError("Этот заказ не относится к ручной или гибридной проверке")
 
     order.status = "paid"
     order.moderation_status = "confirmed"
@@ -131,6 +140,8 @@ async def reject_moderated_order(session: AsyncSession, order_id: int) -> Modera
     )
     if order is None:
         raise RuntimeError("Заказ не найден")
+    if order.payment_provider not in MODERATED_PAYMENT_PROVIDERS:
+        raise RuntimeError("Этот заказ не относится к ручной или гибридной проверке")
 
     await revoke_user_access(session, order.user_id)
     order.status = "rejected"
@@ -176,6 +187,7 @@ async def expire_unconfirmed_orders(session: AsyncSession, *, limit: int = 100) 
             .where(
                 Order.status == "provisional",
                 Order.moderation_status == "pending_review",
+                Order.payment_provider.in_(MODERATED_PAYMENT_PROVIDERS),
                 Order.provisional_expires_at <= utcnow(),
             )
             .order_by(Order.provisional_expires_at.asc())
