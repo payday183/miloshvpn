@@ -218,9 +218,10 @@ async def check_payment(callback: CallbackQuery, bot: Bot) -> None:
         elif order.status == "pending":
             await session.commit()
             await callback.message.answer(
-                "⏳ Мы проверяем оплату.\n\n"
+                "⏳ Ваша оплата проверяется.\n\n"
                 "Подождите пару минут, DonationAlerts иногда отдаёт донат не сразу.\n\n"
                 "Когда backend увидит оплату, бот автоматически пришлёт вам ключ и подписка появится в Профиле.\n\n"
+                "Если произошла ошибка или ключ не пришёл через пару минут, напишите админу @miloshadmin — поможем.\n\n"
                 "Проверьте, что в сообщении DonationAlerts был этот код:\n"
                 f"<code>{order.payment_code}</code>",
                 parse_mode=ParseMode.HTML,
@@ -232,8 +233,18 @@ async def check_payment(callback: CallbackQuery, bot: Bot) -> None:
                 await notify_paid_orders(bot)
             except httpx.HTTPStatusError as exc:
                 logging.warning("DonationAlerts check failed with %s", exc.response.status_code)
+                await callback.message.answer(
+                    "⚠️ Проверка оплаты сейчас споткнулась.\n\n"
+                    "Не переживайте: если донат был с правильным кодом, мы поможем его найти. "
+                    "Напишите админу @miloshadmin."
+                )
             except Exception:
                 logging.exception("Payment check failed")
+                await callback.message.answer(
+                    "⚠️ Проверка оплаты сейчас споткнулась.\n\n"
+                    "Не переживайте: если донат был с правильным кодом, мы поможем его найти. "
+                    "Напишите админу @miloshadmin."
+                )
             return
         else:
             await session.commit()
