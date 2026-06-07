@@ -1,6 +1,7 @@
 from html import escape
 from urllib.parse import urlencode
 
+from aiogram import Bot
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
@@ -18,8 +19,10 @@ from app.services.admin_auth import (
 from app.services.admin_keys import create_admin_key
 from app.services.billing import poll_donations
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
+from app.services.manual_orders import ManualOrderError, ManualOrderGrantResult, manually_confirm_order, search_orders_for_admin
 from app.services.node_monitor import format_bytes, local_key_counts, refresh_all_nodes, refresh_node_status
 from app.services.nodes import activate_node, create_node, disable_node, list_nodes
+from app.services.payment_notifications import notify_paid_order
 from app.services.public_keys import rotate_public_key
 from app.services.stats import collect_stats
 from app.services.vpn import list_active_private_keys, revoke_private_key
@@ -167,6 +170,40 @@ async def poll_donations_action(
     return redirect_to_admin(request)
 
 
+@router.get("/admin/orders/search", response_class=HTMLResponse)
+async def search_orders_action(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> HTMLResponse:
+    query = str(request.query_params.get("query") or "").strip()
+    token = request.query_params.get("token", "")
+    orders = await search_orders_for_admin(session, query, limit=20) if query else []
+    return HTMLResponse(render_order_search_page(query, orders, token))
+
+
+@router.post("/admin/orders/{order_id}/grant", response_class=HTMLResponse)
+async def grant_order_action(
+    order_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> HTMLResponse:
+    token = request.query_params.get("token", "")
+    try:
+        result = await manually_confirm_order(session, order_id, admin_telegram_id=0)
+        await session.commit()
+    except ManualOrderError as exc:
+        await session.rollback()
+        return HTMLResponse(render_manual_order_error_page(str(exc), token), status_code=404)
+    except Exception:
+        await session.rollback()
+        raise
+
+    notified = await notify_order_from_web(result.order_id)
+    return HTMLResponse(render_manual_order_grant_page(result, notified, token))
+
+
 @router.post("/admin/public-key/rotate")
 async def rotate_public_key_action(
     request: Request,
@@ -217,6 +254,18 @@ async def cleanup_expired_subscriptions_action(
     await expire_subscriptions(session)
     await retry_expired_key_revokes(session)
     return redirect_to_admin(request)
+
+
+async def notify_order_from_web(order_id: int) -> bool:
+    settings = get_settings()
+    if not settings.bot_token:
+        return False
+
+    bot = Bot(settings.bot_token)
+    try:
+        return await notify_paid_order(bot, order_id, force=True)
+    finally:
+        await bot.session.close()
 
 
 @router.get("/api/admin/nodes")
@@ -530,6 +579,7 @@ def render_admin_page(
 ) -> str:
     settings = get_settings()
     token_qs = f"?{urlencode({'token': token})}" if token else ""
+    token_input = hidden_token_input(token)
     default_admin_id = str(settings.admin_ids[0]) if settings.admin_ids else ""
     node_rows = "\n".join(render_node_row(node, node_counts.get(node.id, {}), token_qs) for node in nodes) or table_empty(
         "Нод пока нет"
@@ -540,7 +590,7 @@ def render_admin_page(
     key_rows = "\n".join(render_private_key_row(key, token_qs) for key in private_keys) or table_empty(
         "Личных активных ключей пока нет"
     )
-    order_rows = "\n".join(render_order_row(order) for order in pending_orders) or table_empty("Ожидающих оплат нет")
+    order_rows = "\n".join(render_order_row(order, token_qs) for order in pending_orders) or table_empty("Ожидающих оплат нет")
     return f"""<!doctype html>
 <html lang="ru">
   <head>
@@ -713,6 +763,16 @@ def render_admin_page(
       </section>
 
       <section class="panel">
+        <h2>Найти оплату и выдать ключ</h2>
+        <form method="get" action="/admin/orders/search" class="grid">
+          {token_input}
+          <label>Код, Telegram ID или ID заказа<input name="query" placeholder="MILO-805074848-55481D"></label>
+          <div class="actions"><button type="submit">Найти</button></div>
+        </form>
+        <p class="muted" style="margin-top: 10px;">После поиска можно вручную отметить заказ оплаченным и отправить ключ пользователю.</p>
+      </section>
+
+      <section class="panel">
         <h2>Ноды</h2>
         <div class="actions" style="margin-bottom: 12px;">
           <form method="post" action="/admin/nodes/refresh{token_qs}"><button type="submit">Обновить статус всех нод</button></form>
@@ -809,6 +869,7 @@ def render_admin_page(
               <th>Сумма</th>
               <th>Код</th>
               <th>Истекает</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>{order_rows}</tbody>
@@ -847,6 +908,282 @@ def render_admin_key_page(key: VpnKey, telegram_id: int, token: str) -> str:
     </main>
   </body>
 </html>"""
+
+
+def render_order_search_page(query: str, orders: list[Order], token: str) -> str:
+    token_qs = f"?{urlencode({'token': token})}" if token else ""
+    token_input = hidden_token_input(token)
+    rows = "\n".join(render_order_search_row(order, token_qs) for order in orders) if query else ""
+    empty = ""
+    if query and not orders:
+        empty = '<p class="muted">Ничего не найдено. Проверь код или Telegram ID.</p>'
+    table = ""
+    if rows:
+        table = f"""
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Пользователь</th>
+              <th>Тариф</th>
+              <th>Сумма</th>
+              <th>Статус</th>
+              <th>Код</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>"""
+    return f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Поиск оплаты</title>
+    <style>{admin_simple_page_css()}</style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <p class="eyebrow">MiloshVPN Admin</p>
+        <h1>Найти оплату</h1>
+        <form method="get" action="/admin/orders/search" class="grid">
+          {token_input}
+          <label>Код, Telegram ID или ID заказа<input name="query" value="{escape(query)}" placeholder="MILO-805074848-55481D"></label>
+          <div class="actions"><button type="submit">Найти</button><a class="button secondary" href="/admin{token_qs}">Назад</a></div>
+        </form>
+      </section>
+      <section class="panel">
+        <h2>Результат</h2>
+        {empty}
+        {table}
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def render_manual_order_grant_page(result: ManualOrderGrantResult, notified: bool, token: str) -> str:
+    token_qs = f"?{urlencode({'token': token})}" if token else ""
+    if result.granted:
+        action = "Заказ отмечен оплаченным, подписка применена, ключ создан."
+    elif result.repaired_key:
+        action = "Заказ уже был оплачен, отсутствующий ключ пересоздан."
+    elif result.was_already_paid:
+        action = "Заказ уже был оплачен, срок повторно не продлевался."
+    else:
+        action = "Заказ проверен."
+    notified_text = "Сообщение с ключом отправлено пользователю." if notified else (
+        "Сообщение отправить не удалось. Ключ уже применён в профиле, можно написать пользователю вручную."
+    )
+    return f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Выдача ключа</title>
+    <style>{admin_simple_page_css()}</style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <p class="eyebrow">MiloshVPN Admin</p>
+        <h1>Ключ выдан</h1>
+        <p>{escape(action)}</p>
+        <dl>
+          <div><dt>Заказ</dt><dd><code>{result.order_id}</code></dd></div>
+          <div><dt>Telegram ID</dt><dd><code>{result.user_telegram_id}</code></dd></div>
+          <div><dt>Тариф</dt><dd>{escape(result.plan_code)}</dd></div>
+          <div><dt>Уведомление</dt><dd>{escape(notified_text)}</dd></div>
+        </dl>
+        <div class="actions">
+          <a class="button" href="/admin{token_qs}">Вернуться в админку</a>
+          <a class="button secondary" href="/admin/orders/search{token_qs}">Найти ещё</a>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def render_manual_order_error_page(error: str, token: str) -> str:
+    token_qs = f"?{urlencode({'token': token})}" if token else ""
+    return f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ошибка выдачи</title>
+    <style>{admin_simple_page_css()}</style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <p class="eyebrow">MiloshVPN Admin</p>
+        <h1>Не получилось выдать ключ</h1>
+        <p class="error">{escape(error)}</p>
+        <a class="button" href="/admin{token_qs}">Вернуться в админку</a>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def render_order_search_row(order: Order, token_qs: str) -> str:
+    user = order.user
+    username = f"@{escape(user.username)}" if user and user.username else ""
+    telegram_id = user.telegram_id if user else ""
+    plan_title = order.plan.title if order.plan else order.plan_code
+    paid = order.paid_at.strftime("%d.%m.%Y %H:%M UTC") if order.paid_at else "не оплачено"
+    return f"""<tr>
+      <td>{order.id}</td>
+      <td><code>{telegram_id}</code><br>{username}</td>
+      <td>{escape(plan_title)}<br><span class="muted">{escape(order.plan_code)}</span></td>
+      <td>{order.amount_rub} RUB</td>
+      <td><span class="badge">{escape(order.status)}</span><br><span class="muted">{paid}</span></td>
+      <td><code>{escape(order.payment_code)}</code></td>
+      <td>
+        <form method="post" action="/admin/orders/{order.id}/grant{token_qs}">
+          <button type="submit">Выдать ключ</button>
+        </form>
+      </td>
+    </tr>"""
+
+
+def hidden_token_input(token: str) -> str:
+    return f'<input type="hidden" name="token" value="{escape(token)}">' if token else ""
+
+
+def admin_simple_page_css() -> str:
+    return """
+      :root {
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #121417;
+        background: #f5f7fa;
+      }
+      body { margin: 0; }
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      .panel {
+        background: #fff;
+        border: 1px solid #dfe5ec;
+        border-radius: 8px;
+        padding: 18px;
+        margin-bottom: 20px;
+      }
+      h1, h2 { margin: 0 0 16px; letter-spacing: 0; }
+      h1 { font-size: 26px; }
+      h2 { font-size: 20px; }
+      .eyebrow {
+        margin: 0 0 8px;
+        color: #687385;
+        font-size: 13px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) auto;
+        gap: 12px;
+        align-items: end;
+      }
+      label {
+        display: grid;
+        gap: 6px;
+        color: #566174;
+        font-size: 13px;
+      }
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid #cad2dc;
+        border-radius: 6px;
+        padding: 9px 10px;
+        font: inherit;
+        background: #fff;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 14px;
+      }
+      th, td {
+        text-align: left;
+        border-bottom: 1px solid #e6ebf1;
+        padding: 10px 8px;
+        vertical-align: top;
+      }
+      th {
+        color: #566174;
+        font-size: 12px;
+        text-transform: uppercase;
+      }
+      button, .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 38px;
+        border: 0;
+        border-radius: 6px;
+        padding: 0 12px;
+        font: inherit;
+        cursor: pointer;
+        background: #1563ff;
+        color: #fff;
+        text-decoration: none;
+      }
+      .button.secondary {
+        background: #e9eef5;
+        color: #121417;
+      }
+      .actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .badge {
+        display: inline-block;
+        border-radius: 999px;
+        padding: 3px 8px;
+        background: #e9eef5;
+        color: #273244;
+        font-size: 12px;
+      }
+      .muted {
+        color: #687385;
+        font-size: 12px;
+      }
+      .error {
+        color: #a51d2d;
+      }
+      code {
+        word-break: break-all;
+      }
+      dl {
+        display: grid;
+        gap: 10px;
+        margin: 16px 0;
+      }
+      dl div {
+        display: grid;
+        grid-template-columns: 130px 1fr;
+        gap: 12px;
+      }
+      dt {
+        color: #687385;
+      }
+      dd {
+        margin: 0;
+      }
+      @media (max-width: 700px) {
+        main { padding: 14px; }
+        .grid { grid-template-columns: 1fr; }
+        table { display: block; overflow-x: auto; }
+        dl div { grid-template-columns: 1fr; gap: 4px; }
+      }
+    """
 
 
 def render_stat(label: str, value: int) -> str:
@@ -937,7 +1274,7 @@ def render_private_key_row(key: VpnKey, token_qs: str) -> str:
     </tr>"""
 
 
-def render_order_row(order: Order) -> str:
+def render_order_row(order: Order, token_qs: str) -> str:
     username = f"@{escape(order.user.username)}" if order.user and order.user.username else ""
     return f"""<tr>
       <td>{order.id}</td>
@@ -946,6 +1283,11 @@ def render_order_row(order: Order) -> str:
       <td>{order.amount_rub} RUB</td>
       <td><code>{escape(order.payment_code)}</code></td>
       <td>{order.expires_at:%d.%m.%Y %H:%M UTC}</td>
+      <td>
+        <form method="post" action="/admin/orders/{order.id}/grant{token_qs}">
+          <button type="submit">Выдать ключ</button>
+        </form>
+      </td>
     </tr>"""
 
 

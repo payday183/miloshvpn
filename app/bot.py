@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
@@ -14,8 +15,9 @@ from app.models import Order, Plan
 from app.services.admin_auth import build_admin_profile_url
 from app.services.admin_keys import create_admin_key
 from app.services.billing import create_order, poll_donations
+from app.services.manual_orders import ManualOrderError, manually_confirm_order, search_orders_for_admin
 from app.services.payment_links import donation_url_for_order
-from app.services.payment_notifications import notify_paid_orders
+from app.services.payment_notifications import notify_paid_order, notify_paid_orders
 from app.services.public_keys import (
     get_active_public_key,
     mark_public_key_posted,
@@ -38,6 +40,9 @@ from app.tg import keyboards as kb
 from app.tg.texts import (
     admin_help_text,
     admin_key_text,
+    admin_manual_grant_result_text,
+    admin_order_result_text,
+    admin_order_search_prompt_text,
     instruction_text,
     payment_text,
     payment_success_text,
@@ -52,6 +57,7 @@ from app.timeutils import utcnow
 
 logging.basicConfig(level=logging.INFO)
 router = Router()
+ADMIN_ORDER_QUERY_RE = re.compile(r"(MILO-[0-9]+-[A-Z0-9]{5,8}|#?[0-9]{1,20})", re.IGNORECASE)
 
 
 def visible_purchase_plans(plans: list[Plan], admin: bool) -> list[Plan]:
@@ -304,6 +310,94 @@ async def create_admin_key_command(message: Message) -> None:
         await session.refresh(key)
 
     await message.answer(admin_key_text(key), parse_mode=ParseMode.HTML, reply_markup=kb.admin_keyboard())
+
+
+@router.message(Command("find_order"))
+async def admin_find_order_command(message: Message) -> None:
+    _, admin = await current_user(message)
+    if not admin:
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip():
+        await message.answer(admin_order_search_prompt_text(), parse_mode=ParseMode.HTML, reply_markup=kb.admin_keyboard())
+        return
+
+    await send_admin_order_search_results(message, parts[1].strip())
+
+
+@router.message(F.text == kb.ADMIN_FIND_ORDER)
+async def admin_find_order_prompt(message: Message) -> None:
+    _, admin = await current_user(message)
+    if not admin:
+        return
+    await message.answer(admin_order_search_prompt_text(), parse_mode=ParseMode.HTML, reply_markup=kb.admin_keyboard())
+
+
+@router.message(F.text.func(lambda text: bool(text and ADMIN_ORDER_QUERY_RE.fullmatch(text.strip()))))
+async def admin_find_order_by_plain_text(message: Message) -> None:
+    _, admin = await current_user(message)
+    if not admin:
+        return
+    await send_admin_order_search_results(message, (message.text or "").strip())
+
+
+async def send_admin_order_search_results(message: Message, query: str) -> None:
+    async with SessionLocal() as session:
+        orders = await search_orders_for_admin(session, query, limit=5)
+
+    if not orders:
+        await message.answer(
+            "Ничего не нашёл по этому коду или ID.\n\n"
+            "Проверь, что код полностью совпадает с тем, что пользователь вставлял в DonationAlerts.",
+            reply_markup=kb.admin_keyboard(),
+        )
+        return
+
+    for order in orders:
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Выдать ключ пользователю", callback_data=f"admin_grant_order:{order.id}")],
+            ]
+        )
+        await message.answer(admin_order_result_text(order), reply_markup=keyboard, parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data.startswith("admin_grant_order:"))
+async def admin_grant_order(callback: CallbackQuery, bot: Bot) -> None:
+    async with SessionLocal() as session:
+        admin_user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        admin = await is_admin(session, admin_user.telegram_id)
+        if not admin:
+            await callback.answer("Админка закрыта.", show_alert=True)
+            return
+
+        order_id = int(callback.data.split(":", 1)[1])
+        try:
+            result = await manually_confirm_order(session, order_id, admin_telegram_id=admin_user.telegram_id)
+            await session.commit()
+        except ManualOrderError as exc:
+            await session.rollback()
+            await callback.answer(str(exc), show_alert=True)
+            return
+        except Exception:
+            await session.rollback()
+            logging.exception("Manual order grant failed")
+            await callback.answer("Не получилось выдать ключ.", show_alert=True)
+            return
+
+    notified = await notify_paid_order(bot, result.order_id, force=True)
+    await callback.message.answer(
+        admin_manual_grant_result_text(result, notified),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb.admin_keyboard(),
+    )
+    await callback.answer("Готово")
 
 
 @router.message(F.text == kb.ADMIN_KEYS)

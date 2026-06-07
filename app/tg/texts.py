@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from app.config import get_settings
 from app.models import Order, Plan, Subscription, User, VpnKey
+from app.services.manual_orders import ManualOrderGrantResult
 from app.services.vpn import TRIAL_PLAN_CODE
 
 
@@ -129,6 +130,62 @@ def admin_key_text(key: VpnKey) -> str:
     )
 
 
+def admin_order_search_prompt_text() -> str:
+    return (
+        "🔎 Найти оплату\n\n"
+        "Отправь мне код из DonationAlerts, Telegram ID пользователя или ID заказа.\n\n"
+        "Примеры:\n"
+        "<code>MILO-805074848-55481D</code>\n"
+        "<code>805074848</code>\n"
+        "<code>/find_order MILO-805074848-55481D</code>"
+    )
+
+
+def admin_order_result_text(order: Order) -> str:
+    user = order.user
+    username = f"@{escape(user.username)}" if user and user.username else "без username"
+    telegram_id = user.telegram_id if user else "?"
+    plan_title = order.plan.title if order.plan else order.plan_code
+    paid_at = order.paid_at.strftime("%d.%m.%Y %H:%M UTC") if order.paid_at else "ещё нет"
+    notified_at = order.notified_at.strftime("%d.%m.%Y %H:%M UTC") if order.notified_at else "ещё нет"
+    return (
+        "🧾 Заказ найден\n\n"
+        f"ID заказа: <code>{order.id}</code>\n"
+        f"Пользователь: {username}\n"
+        f"Telegram ID: <code>{telegram_id}</code>\n\n"
+        f"Тариф: <b>{escape(plan_title)}</b>\n"
+        f"Сумма: {format_price(Decimal(order.amount_rub))} RUB\n"
+        f"Статус: <b>{escape(order.status)}</b>\n\n"
+        f"Код: <code>{escape(order.payment_code)}</code>\n"
+        f"Создан: {order.created_at:%d.%m.%Y %H:%M UTC}\n"
+        f"Истекает: {order.expires_at:%d.%m.%Y %H:%M UTC}\n"
+        f"Оплачен: {paid_at}\n"
+        f"Уведомление: {notified_at}"
+    )
+
+
+def admin_manual_grant_result_text(result: ManualOrderGrantResult, notified: bool) -> str:
+    if result.granted:
+        action = "✅ Заказ вручную отмечен оплаченным, подписка применена, ключ создан."
+    elif result.repaired_key:
+        action = "✅ Заказ уже был оплачен, отсутствующий ключ пересоздан."
+    elif result.was_already_paid:
+        action = "ℹ️ Заказ уже был оплачен, срок повторно не продлевал."
+    else:
+        action = "ℹ️ Заказ проверен."
+
+    notify_line = "Пользователю отправлено сообщение с ключом." if notified else (
+        "Сообщение пользователю отправить не получилось. Ключ уже в профиле, можно написать ему вручную."
+    )
+    return (
+        f"{action}\n\n"
+        f"Заказ: <code>{result.order_id}</code>\n"
+        f"Пользователь: <code>{result.user_telegram_id}</code>\n"
+        f"Тариф: <b>{escape(result.plan_code)}</b>\n\n"
+        f"{notify_line}"
+    )
+
+
 def instruction_text() -> str:
     return (
         "📘 Инструкция\n\n"
@@ -172,10 +229,12 @@ def admin_help_text() -> str:
         f'Web-панель: <a href="{escape(panel_url)}">открыть</a>\n\n'
         "Что можно сделать здесь:\n"
         "• посмотреть статистику и ожидающие оплаты;\n"
+        "• найти оплату по коду или Telegram ID и выдать ключ вручную;\n"
         "• увидеть личные ключи и удалить лишний;\n"
         "• создать admin key без оплаты;\n"
         "• управлять бесплатным публичным ключом.\n\n"
         "<code>/add_admin TELEGRAM_ID</code> — добавить админа.\n"
+        "<code>/find_order КОД_ИЛИ_ID</code> — найти оплату.\n"
         "<code>/admin_key</code> — создать admin key."
     )
 
