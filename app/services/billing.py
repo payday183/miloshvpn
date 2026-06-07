@@ -203,12 +203,15 @@ async def process_donation(session: AsyncSession, donation: dict[str, Any]) -> b
         return True
 
     required_amount = await required_order_amount(session, order)
-    if amount < required_amount:
+    settings = get_settings()
+    amount_tolerance = max(Decimal("0"), Decimal(settings.payment_amount_tolerance_rub))
+    if amount + amount_tolerance < required_amount:
         logger.warning(
-            "Donation amount is too low for order %s: amount=%s required=%s external_id=%s",
+            "Donation amount is too low for order %s: amount=%s required=%s tolerance=%s external_id=%s",
             order.id,
             amount,
             required_amount,
+            amount_tolerance,
             external_id,
         )
         return True

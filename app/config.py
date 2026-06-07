@@ -1,4 +1,5 @@
 from functools import lru_cache
+from decimal import Decimal
 from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
@@ -26,6 +27,7 @@ class Settings(BaseSettings):
     donationalerts_poll_interval_seconds: int = 45
     donationalerts_fetch_limit: int = 50
     donationalerts_fetch_pages: int = 3
+    payment_amount_tolerance_rub: Decimal = Decimal("2.00")
 
     x3ui_mode: Literal["mock", "live"] = "mock"
     x3ui_base_url: str = "http://x3ui:2053"
