@@ -74,7 +74,7 @@ def plans_text(plans: list[Plan]) -> str:
 
 def payment_text(order: Order, plan: Plan) -> str:
     required_amount = max(Decimal(order.amount_rub), Decimal(plan.price_rub))
-    code_frame = f"<pre>----\n{escape(order.payment_code)}\n----</pre>"
+    code_frame = f"----\n<code>{escape(order.payment_code)}</code>\n----"
     return (
         "🧾 Заказ готов\n\n"
         f"Тариф: <b>{escape(plan.title)}</b>\n"
