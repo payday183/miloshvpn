@@ -59,6 +59,20 @@ async def get_admin_chat_ids(session: AsyncSession) -> list[int]:
     return list(dict.fromkeys(int(admin) for admin in admins))
 
 
+async def list_pending_review_orders(session: AsyncSession, *, limit: int = 200) -> list[Order]:
+    return list(
+        (
+            await session.scalars(
+                select(Order)
+                .options(selectinload(Order.user), selectinload(Order.plan))
+                .where(Order.status == "provisional", Order.moderation_status == "pending_review")
+                .order_by(Order.paid_at.asc(), Order.created_at.asc())
+                .limit(limit)
+            )
+        ).all()
+    )
+
+
 async def grant_provisional_access(session: AsyncSession, order_id: int) -> ModerationResult:
     order = await session.scalar(
         select(Order)

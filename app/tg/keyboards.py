@@ -15,6 +15,7 @@ ADMIN_STATS = "Статистика"
 ADMIN_ROTATE_FREE = "Пересоздать free key"
 ADMIN_POST_FREE = "Опубликовать free key"
 ADMIN_PENDING = "Ожидающие оплаты"
+ADMIN_REVIEW_ORDERS = "Проверить заказы"
 ADMIN_FIND_ORDER = "Найти оплату"
 ADMIN_PAYMENT_MODE = "Система оплаты"
 ADMIN_CREATE_KEY = "Создать admin key"
@@ -37,9 +38,10 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=ADMIN_STATS), KeyboardButton(text=ADMIN_PENDING)],
-            [KeyboardButton(text=ADMIN_FIND_ORDER), KeyboardButton(text=ADMIN_KEYS)],
-            [KeyboardButton(text=ADMIN_PAYMENT_MODE), KeyboardButton(text=ADMIN_CREATE_KEY)],
-            [KeyboardButton(text=ADMIN_ROTATE_FREE), KeyboardButton(text=ADMIN_POST_FREE)],
+            [KeyboardButton(text=ADMIN_REVIEW_ORDERS), KeyboardButton(text=ADMIN_FIND_ORDER)],
+            [KeyboardButton(text=ADMIN_KEYS), KeyboardButton(text=ADMIN_PAYMENT_MODE)],
+            [KeyboardButton(text=ADMIN_CREATE_KEY), KeyboardButton(text=ADMIN_ROTATE_FREE)],
+            [KeyboardButton(text=ADMIN_POST_FREE)],
             [KeyboardButton(text=PROFILE), KeyboardButton(text=ADMIN_MAIN_MENU)],
         ],
         resize_keyboard=True,

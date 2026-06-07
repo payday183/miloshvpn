@@ -4,8 +4,8 @@ import re
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
-from aiogram.filters import Command, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.filters import BaseFilter, Command, CommandStart
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
@@ -29,6 +29,7 @@ from app.services.payment_moderation import (
     ensure_order_note,
     get_admin_chat_ids,
     grant_provisional_access,
+    list_pending_review_orders,
     reject_moderated_order,
 )
 from app.services.payment_links import donation_url_for_order
@@ -59,6 +60,11 @@ from app.tg.texts import (
     admin_qr_request_text,
     admin_order_result_text,
     admin_order_search_prompt_text,
+    admin_review_fast_prompt_text,
+    admin_review_fast_result_text,
+    admin_review_orders_menu_text,
+    admin_review_orders_txt,
+    admin_review_queue_item_text,
     admin_review_request_text,
     hybrid_payment_text,
     instruction_text,
@@ -83,6 +89,14 @@ logging.basicConfig(level=logging.INFO)
 router = Router()
 ADMIN_ORDER_QUERY_RE = re.compile(r"(MILO-[0-9]+-[A-Z0-9]{5,8}|#?[0-9]{1,20})", re.IGNORECASE)
 PENDING_QR_UPLOADS: dict[int, int] = {}
+PENDING_FAST_REVIEW_UPLOADS: set[int] = set()
+REVIEW_QUEUE_STATE: dict[int, list[int]] = {}
+REVIEW_QUEUE_TOTALS: dict[int, int] = {}
+
+
+class PendingFastReviewFilter(BaseFilter):
+    async def __call__(self, message: Message) -> bool:
+        return bool(message.from_user and message.from_user.id in PENDING_FAST_REVIEW_UPLOADS)
 
 
 def visible_purchase_plans(plans: list[Plan], admin: bool) -> list[Plan]:
@@ -360,13 +374,24 @@ async def check_payment(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer()
 
 
-def admin_review_keyboard(order_id: int) -> InlineKeyboardMarkup:
+def admin_review_keyboard(order_id: int, *, prefix: str = "admin_review") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Оплатил", callback_data=f"admin_review_confirm:{order_id}"),
-                InlineKeyboardButton(text="❌ Не оплатил", callback_data=f"admin_review_reject:{order_id}"),
+                InlineKeyboardButton(text="✅ Оплатил", callback_data=f"{prefix}_confirm:{order_id}"),
+                InlineKeyboardButton(text="❌ Не оплатил", callback_data=f"{prefix}_reject:{order_id}"),
             ]
+        ]
+    )
+
+
+def admin_review_orders_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Очередь", callback_data="admin_review_queue")],
+            [InlineKeyboardButton(text="Сделать файл txt", callback_data="admin_review_txt")],
+            [InlineKeyboardButton(text="Весь очередный список", callback_data="admin_review_all")],
+            [InlineKeyboardButton(text="Быстрая проверка", callback_data="admin_review_fast")],
         ]
     )
 
@@ -379,6 +404,160 @@ async def send_admin_order_message(bot: Bot, text: str, reply_markup: InlineKeyb
             await bot.send_message(admin_id, text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
         except Exception:
             logging.exception("Failed to send admin moderation message to %s", admin_id)
+
+
+async def callback_from_admin(callback: CallbackQuery) -> bool:
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        admin = await is_admin(session, user.telegram_id)
+        await session.commit()
+    return admin
+
+
+async def apply_admin_review_decision(bot: Bot, order_id: int, *, approved: bool) -> int | None:
+    async with SessionLocal() as session:
+        result = (
+            await confirm_moderated_order(session, order_id)
+            if approved
+            else await reject_moderated_order(session, order_id)
+        )
+        user_telegram_id = result.order.user.telegram_id if result.order.user else None
+        await session.commit()
+
+    if user_telegram_id is None:
+        return None
+
+    if approved:
+        await bot.send_message(user_telegram_id, "✅ Оплата подтверждена. Тариф закреплён, спасибо за поддержку!")
+    else:
+        await bot.send_message(user_telegram_id, moderation_rejected_user_text())
+    return user_telegram_id
+
+
+async def send_next_review_queue_item(message: Message, admin_id: int) -> None:
+    order_ids = REVIEW_QUEUE_STATE.get(admin_id, [])
+    total = REVIEW_QUEUE_TOTALS.get(admin_id, len(order_ids))
+
+    while order_ids:
+        order_id = order_ids[0]
+        async with SessionLocal() as session:
+            order = await session.scalar(
+                select(Order)
+                .options(selectinload(Order.user), selectinload(Order.plan))
+                .where(Order.id == order_id)
+            )
+        if order and order.status == "provisional" and order.moderation_status == "pending_review":
+            position = total - len(order_ids) + 1
+            await message.answer(
+                admin_review_queue_item_text(order, position, total),
+                parse_mode=ParseMode.HTML,
+                reply_markup=admin_review_keyboard(order.id, prefix="admin_queue"),
+            )
+            return
+        order_ids.pop(0)
+
+    REVIEW_QUEUE_STATE.pop(admin_id, None)
+    REVIEW_QUEUE_TOTALS.pop(admin_id, None)
+    await message.answer("✅ Очередь закончилась. Все заказы из этого прохода разобраны.", reply_markup=kb.admin_keyboard())
+
+
+def normalize_review_token(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip().strip("`")).lower()
+
+
+def parse_review_tokens(raw: str) -> set[str]:
+    tokens: set[str] = set()
+    for line in raw.splitlines():
+        text = line.replace("<code>", "").replace("</code>", "").strip()
+        if not text or set(text) <= {"-", "—", "_"}:
+            continue
+        code_matches = re.findall(r"MILO-[0-9]+-[A-Z0-9]{5,8}", text, flags=re.IGNORECASE)
+        if code_matches:
+            tokens.update(normalize_review_token(match) for match in code_matches)
+        else:
+            tokens.add(normalize_review_token(text))
+    return {token for token in tokens if token}
+
+
+def order_review_tokens(order: Order) -> set[str]:
+    tokens = {normalize_review_token(order.payment_code)}
+    if order.moderation_note:
+        tokens.add(normalize_review_token(order.moderation_note))
+    return tokens
+
+
+async def read_fast_review_payload(message: Message, bot: Bot) -> str:
+    if message.text:
+        return message.text
+    if not message.document:
+        return ""
+    if message.document.file_size and message.document.file_size > 1024 * 1024:
+        raise RuntimeError("Файл слишком большой. Пришлите txt до 1 МБ.")
+
+    file = await bot.get_file(message.document.file_id)
+    if not file.file_path:
+        raise RuntimeError("Не получилось скачать файл.")
+    stream = await bot.download_file(file.file_path)
+    data = stream.read()
+    for encoding in ("utf-8-sig", "utf-8", "cp1251"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="ignore")
+
+
+async def run_fast_review(message: Message, bot: Bot, raw_payload: str) -> None:
+    tokens = parse_review_tokens(raw_payload)
+    if not tokens:
+        await message.answer(
+            "Не увидел кодов в файле или сообщении.\n\nКаждый подтверждённый код отправляйте с новой строки.",
+            reply_markup=kb.admin_keyboard(),
+        )
+        return
+
+    confirmed_users: list[int] = []
+    rejected_users: list[int] = []
+    matched_tokens: set[str] = set()
+    async with SessionLocal() as session:
+        orders = await list_pending_review_orders(session, limit=500)
+        for order in orders:
+            order_tokens = order_review_tokens(order)
+            matched = bool(order_tokens & tokens)
+            if matched:
+                result = await confirm_moderated_order(session, order.id)
+                if result.order.user:
+                    confirmed_users.append(result.order.user.telegram_id)
+                matched_tokens.update(order_tokens & tokens)
+            else:
+                result = await reject_moderated_order(session, order.id)
+                if result.order.user:
+                    rejected_users.append(result.order.user.telegram_id)
+        await session.commit()
+
+    for telegram_id in confirmed_users:
+        try:
+            await bot.send_message(telegram_id, "✅ Оплата подтверждена. Тариф закреплён, спасибо за поддержку!")
+        except Exception:
+            logging.exception("Failed to notify confirmed user %s", telegram_id)
+
+    for telegram_id in rejected_users:
+        try:
+            await bot.send_message(telegram_id, moderation_rejected_user_text())
+        except Exception:
+            logging.exception("Failed to notify rejected user %s", telegram_id)
+
+    unknown = sorted(tokens - matched_tokens)
+    await message.answer(
+        admin_review_fast_result_text(len(confirmed_users), len(rejected_users), unknown),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb.admin_keyboard(),
+    )
 
 
 @router.message(F.text == kb.HELP)
@@ -406,6 +585,103 @@ async def admin_panel(message: Message) -> None:
         await message.answer("Админка только для своих.")
         return
     await message.answer(admin_help_text(), reply_markup=kb.admin_keyboard(), parse_mode=ParseMode.HTML)
+
+
+@router.message(F.text == kb.ADMIN_REVIEW_ORDERS)
+async def admin_review_orders_menu(message: Message) -> None:
+    _, admin = await current_user(message)
+    if not admin:
+        return
+    async with SessionLocal() as session:
+        orders = await list_pending_review_orders(session, limit=500)
+    await message.answer(
+        admin_review_orders_menu_text(len(orders)),
+        parse_mode=ParseMode.HTML,
+        reply_markup=admin_review_orders_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "admin_review_queue")
+async def admin_review_queue_start(callback: CallbackQuery) -> None:
+    if not await callback_from_admin(callback):
+        await callback.answer("Админка закрыта.", show_alert=True)
+        return
+
+    async with SessionLocal() as session:
+        orders = await list_pending_review_orders(session, limit=500)
+    if not orders:
+        await callback.message.answer("✅ Очередь чистая, проверять сейчас нечего.", reply_markup=kb.admin_keyboard())
+        await callback.answer("Пусто")
+        return
+
+    REVIEW_QUEUE_STATE[callback.from_user.id] = [order.id for order in orders]
+    REVIEW_QUEUE_TOTALS[callback.from_user.id] = len(orders)
+    await callback.answer("Очередь запущена")
+    await send_next_review_queue_item(callback.message, callback.from_user.id)
+
+
+@router.callback_query(F.data == "admin_review_txt")
+async def admin_review_txt(callback: CallbackQuery) -> None:
+    if not await callback_from_admin(callback):
+        await callback.answer("Админка закрыта.", show_alert=True)
+        return
+
+    async with SessionLocal() as session:
+        orders = await list_pending_review_orders(session, limit=500)
+    content = admin_review_orders_txt(orders)
+    document = BufferedInputFile(content.encode("utf-8"), filename="miloshvpn_review_orders.txt")
+    await callback.message.answer_document(
+        document,
+        caption=f"TXT по очереди проверки: {len(orders)} заказов.",
+        reply_markup=kb.admin_keyboard(),
+    )
+    await callback.answer("Файл готов")
+
+
+@router.callback_query(F.data == "admin_review_all")
+async def admin_review_all(callback: CallbackQuery) -> None:
+    if not await callback_from_admin(callback):
+        await callback.answer("Админка закрыта.", show_alert=True)
+        return
+
+    async with SessionLocal() as session:
+        orders = await list_pending_review_orders(session, limit=500)
+    if not orders:
+        await callback.message.answer("✅ Очередь чистая, проверять сейчас нечего.", reply_markup=kb.admin_keyboard())
+        await callback.answer("Пусто")
+        return
+
+    await callback.answer("Отправляю список")
+    await callback.message.answer(f"Отправляю весь список: {len(orders)} заказов.", reply_markup=kb.admin_keyboard())
+    for order in orders:
+        await callback.message.answer(
+            admin_review_request_text(order),
+            parse_mode=ParseMode.HTML,
+            reply_markup=admin_review_keyboard(order.id),
+        )
+        await asyncio.sleep(0.05)
+
+
+@router.callback_query(F.data == "admin_review_fast")
+async def admin_review_fast(callback: CallbackQuery) -> None:
+    if not await callback_from_admin(callback):
+        await callback.answer("Админка закрыта.", show_alert=True)
+        return
+
+    async with SessionLocal() as session:
+        orders = await list_pending_review_orders(session, limit=500)
+    if not orders:
+        await callback.message.answer("✅ Очередь чистая, быстрый список сейчас не нужен.", reply_markup=kb.admin_keyboard())
+        await callback.answer("Пусто")
+        return
+
+    PENDING_FAST_REVIEW_UPLOADS.add(callback.from_user.id)
+    await callback.message.answer(
+        admin_review_fast_prompt_text(len(orders)),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb.admin_keyboard(),
+    )
+    await callback.answer("Жду txt")
 
 
 @router.message(F.text == kb.ADMIN_PAYMENT_MODE)
@@ -530,6 +806,27 @@ async def admin_qr_upload_start(callback: CallbackQuery) -> None:
     await callback.answer("Жду QR")
 
 
+@router.message(PendingFastReviewFilter(), F.text | F.document)
+async def admin_fast_review_receive(message: Message, bot: Bot) -> None:
+    _, admin = await current_user(message)
+    if not admin:
+        PENDING_FAST_REVIEW_UPLOADS.discard(message.from_user.id)
+        return
+
+    try:
+        payload = await read_fast_review_payload(message, bot)
+    except RuntimeError as exc:
+        await message.answer(str(exc), reply_markup=kb.admin_keyboard())
+        return
+    except Exception:
+        logging.exception("Failed to read fast review payload")
+        await message.answer("Не получилось прочитать txt-файл. Попробуйте отправить коды обычным сообщением.")
+        return
+
+    PENDING_FAST_REVIEW_UPLOADS.discard(message.from_user.id)
+    await run_fast_review(message, bot, payload)
+
+
 @router.message(F.photo | F.document)
 async def admin_qr_upload_receive(message: Message, bot: Bot) -> None:
     order_id = PENDING_QR_UPLOADS.get(message.from_user.id)
@@ -581,45 +878,80 @@ async def admin_qr_upload_receive(message: Message, bot: Bot) -> None:
 @router.callback_query(F.data.startswith("admin_review_confirm:"))
 async def admin_review_confirm(callback: CallbackQuery, bot: Bot) -> None:
     order_id = int(callback.data.split(":", 1)[1])
-    async with SessionLocal() as session:
-        admin_user = await get_or_create_user(
-            session,
-            telegram_id=callback.from_user.id,
-            username=callback.from_user.username,
-            first_name=callback.from_user.first_name,
-        )
-        admin = await is_admin(session, admin_user.telegram_id)
-        if not admin:
-            await callback.answer("Админка закрыта.", show_alert=True)
-            return
-        result = await confirm_moderated_order(session, order_id)
-        await session.commit()
-
-    await bot.send_message(result.order.user.telegram_id, "✅ Оплата подтверждена. Тариф закреплён, спасибо за поддержку!")
-    await callback.message.answer(f"Заказ <code>{order_id}</code> подтверждён.", parse_mode=ParseMode.HTML, reply_markup=kb.admin_keyboard())
+    if not await callback_from_admin(callback):
+        await callback.answer("Админка закрыта.", show_alert=True)
+        return
+    try:
+        await apply_admin_review_decision(bot, order_id, approved=True)
+    except RuntimeError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer(
+        f"Заказ <code>{order_id}</code> подтверждён.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb.admin_keyboard(),
+    )
     await callback.answer("Подтверждено")
 
 
 @router.callback_query(F.data.startswith("admin_review_reject:"))
 async def admin_review_reject(callback: CallbackQuery, bot: Bot) -> None:
     order_id = int(callback.data.split(":", 1)[1])
-    async with SessionLocal() as session:
-        admin_user = await get_or_create_user(
-            session,
-            telegram_id=callback.from_user.id,
-            username=callback.from_user.username,
-            first_name=callback.from_user.first_name,
-        )
-        admin = await is_admin(session, admin_user.telegram_id)
-        if not admin:
-            await callback.answer("Админка закрыта.", show_alert=True)
-            return
-        result = await reject_moderated_order(session, order_id)
-        await session.commit()
-
-    await bot.send_message(result.order.user.telegram_id, moderation_rejected_user_text())
-    await callback.message.answer(f"Заказ <code>{order_id}</code> отклонён, доступ отозван.", parse_mode=ParseMode.HTML, reply_markup=kb.admin_keyboard())
+    if not await callback_from_admin(callback):
+        await callback.answer("Админка закрыта.", show_alert=True)
+        return
+    try:
+        await apply_admin_review_decision(bot, order_id, approved=False)
+    except RuntimeError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer(
+        f"Заказ <code>{order_id}</code> отклонён, доступ отозван.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb.admin_keyboard(),
+    )
     await callback.answer("Отклонено")
+
+
+@router.callback_query(F.data.startswith("admin_queue_confirm:"))
+async def admin_queue_confirm(callback: CallbackQuery, bot: Bot) -> None:
+    await handle_admin_queue_decision(callback, bot, approved=True)
+
+
+@router.callback_query(F.data.startswith("admin_queue_reject:"))
+async def admin_queue_reject(callback: CallbackQuery, bot: Bot) -> None:
+    await handle_admin_queue_decision(callback, bot, approved=False)
+
+
+async def handle_admin_queue_decision(callback: CallbackQuery, bot: Bot, *, approved: bool) -> None:
+    order_id = int(callback.data.split(":", 1)[1])
+    if not await callback_from_admin(callback):
+        await callback.answer("Админка закрыта.", show_alert=True)
+        return
+    try:
+        await apply_admin_review_decision(bot, order_id, approved=approved)
+    except RuntimeError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+
+    order_ids = REVIEW_QUEUE_STATE.get(callback.from_user.id, [])
+    if order_id in order_ids:
+        order_ids.remove(order_id)
+
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+    await callback.answer("Подтверждено" if approved else "Отклонено")
+    await send_next_review_queue_item(callback.message, callback.from_user.id)
 
 
 @router.message(Command("find_order"))

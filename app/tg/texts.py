@@ -158,6 +158,84 @@ def admin_review_request_text(order: Order) -> str:
     )
 
 
+def admin_review_orders_menu_text(count: int) -> str:
+    if count <= 0:
+        return (
+            "✅ Очередь чистая\n\n"
+            "Заказов, где пользователь уже получил временный доступ и ждёт решения админа, сейчас нет."
+        )
+    return (
+        "🧾 Проверить все заказы\n\n"
+        f"На ручной проверке: <b>{count}</b>\n\n"
+        "Можно пройти их очередью, скачать txt, вывести весь список сообщениями или загрузить txt "
+        "с подтверждёнными кодами для быстрой сверки."
+    )
+
+
+def admin_review_queue_item_text(order: Order, position: int, total: int) -> str:
+    return (
+        f"📌 Очередь проверки: <b>{position}</b> из <b>{total}</b>\n"
+        "Первым идёт тот, кто раньше всех нажал Проверить оплату.\n\n"
+        f"{admin_review_request_text(order)}"
+    )
+
+
+def admin_review_fast_prompt_text(count: int) -> str:
+    return (
+        "⚡ Быстрая проверка\n\n"
+        f"В очереди сейчас: <b>{count}</b>\n\n"
+        "Пришлите txt-файл или просто сообщение со списком подтверждённых кодов/слов.\n"
+        "Каждый код — с новой строки.\n\n"
+        "Что есть в списке — бот подтвердит ✅\n"
+        "Чего нет в списке — бот отклонит ❌ и напишет пользователю в поддержку."
+    )
+
+
+def admin_review_fast_result_text(confirmed: int, rejected: int, unknown: list[str]) -> str:
+    unknown_text = ""
+    if unknown:
+        visible = "\n".join(f"• <code>{escape(item)}</code>" for item in unknown[:20])
+        tail = "\n..." if len(unknown) > 20 else ""
+        unknown_text = f"\n\nНе нашёл в очереди:\n{visible}{tail}"
+    return (
+        "⚡ Быстрая проверка закончена\n\n"
+        f"Подтверждено: <b>{confirmed}</b>\n"
+        f"Отклонено: <b>{rejected}</b>"
+        f"{unknown_text}"
+    )
+
+
+def admin_review_orders_txt(orders: list[Order]) -> str:
+    if not orders:
+        return "Очередь проверки пуста.\n"
+
+    lines = ["MiloshVPN: очередь проверки заказов", ""]
+    for index, order in enumerate(orders, start=1):
+        user = order.user
+        username = f"@{user.username}" if user and user.username else "без username"
+        telegram_id = user.telegram_id if user else "?"
+        plan_title = order.plan.title if order.plan else order.plan_code
+        note = order.moderation_note or order.payment_code
+        paid_at = order.paid_at.strftime("%d.%m.%Y %H:%M UTC") if order.paid_at else "нет"
+        expires = order.provisional_expires_at.strftime("%d.%m.%Y %H:%M UTC") if order.provisional_expires_at else "нет"
+        lines.extend(
+            [
+                f"{index}. Заказ #{order.id}",
+                f"Пользователь: {username}",
+                f"Telegram ID: {telegram_id}",
+                f"Тариф: {plan_title} ({order.plan_code})",
+                f"Сумма: {format_price(Decimal(order.amount_rub))} RUB",
+                f"Провайдер: {payment_provider_label(order.payment_provider)}",
+                f"Код: {order.payment_code}",
+                f"Код/слова платежа: {note}",
+                f"Оплата нажата: {paid_at}",
+                f"Временный доступ до: {expires}",
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
 def payment_mode_admin_text(active_provider: str) -> str:
     return (
         "💳 Система оплаты\n\n"
@@ -320,6 +398,7 @@ def admin_help_text() -> str:
         f'Web-панель: <a href="{escape(panel_url)}">открыть</a>\n\n'
         "Что можно сделать здесь:\n"
         "• посмотреть статистику и ожидающие оплаты;\n"
+        "• проверить все заказы очередью, txt-файлом или быстрой сверкой;\n"
         "• найти оплату по коду или Telegram ID и выдать ключ вручную;\n"
         "• выбрать систему оплаты для новых заказов;\n"
         "• увидеть личные ключи и удалить лишний;\n"
