@@ -53,6 +53,15 @@ sudo nft -f nftables-abuse-guard.nft
 
 Review the rules before applying them. Firewall policies are host-level and can interrupt existing services if ports overlap.
 
+## Host network tuning
+
+For small VPN nodes, apply the sysctl baseline from this repo to reduce swap stalls and make mobile TCP streams recover better from MTU issues:
+
+```sh
+sudo install -m 0644 ../systemd/99-miloshvpn-network.conf /etc/sysctl.d/99-miloshvpn-network.conf
+sudo sysctl --system
+```
+
 ## Backend load balancing
 
 Backend uses `NODE_SELECTION_MODE=least_loaded` by default. It chooses an online active node with free slots and lower score by:
