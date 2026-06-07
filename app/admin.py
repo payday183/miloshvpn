@@ -850,7 +850,7 @@ def render_admin_page(
           <label>Public host<input name="public_host" value="127.0.0.1"></label>
           <label>Public port<input name="public_port" value="8443" type="number"></label>
           <label>VLESS query<input name="vless_query" value="type=tcp&security=none"></label>
-          <label><input name="activate" type="checkbox" checked> Сделать активной</label>
+          <label><input name="activate" type="checkbox" checked> Использовать для пользователей</label>
           <div class="actions"><button type="submit">Добавить ноду</button></div>
         </form>
       </section>
@@ -1261,7 +1261,7 @@ def render_node_row(node: VpnNode, counts: dict[str, int], token_qs: str) -> str
         '<button class="danger" type="submit">Отключить</button></form>'
         if node.is_active
         else f'<form method="post" action="/admin/nodes/{node.id}/activate{token_qs}">'
-        '<button type="submit">Активировать</button></form>'
+        '<button type="submit">В пул пользователей</button></form>'
     )
     return f"""<tr>
       <td>{node.id}</td>

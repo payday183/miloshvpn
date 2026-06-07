@@ -12,10 +12,30 @@ async def list_nodes(session: AsyncSession) -> list[VpnNode]:
 
 
 async def get_active_node(session: AsyncSession) -> VpnNode | None:
-    return await session.scalar(select(VpnNode).where(VpnNode.is_active.is_(True)).order_by(VpnNode.id))
+    settings = get_settings()
+    return await session.scalar(
+        select(VpnNode)
+        .where(
+            VpnNode.is_active.is_(True),
+            VpnNode.id.not_in(settings.admin_reserved_node_ids),
+        )
+        .order_by(VpnNode.id)
+    )
 
 
 async def select_admin_node(session: AsyncSession) -> VpnNode | None:
+    settings = get_settings()
+    reserved_node = await session.scalar(
+        select(VpnNode)
+        .where(
+            VpnNode.id.in_(settings.admin_reserved_node_ids),
+            VpnNode.status != "offline",
+        )
+        .order_by(VpnNode.id)
+    )
+    if reserved_node is not None:
+        return reserved_node
+
     nodes = (
         await session.scalars(
             select(VpnNode)
@@ -34,7 +54,10 @@ async def select_node_for_key(session: AsyncSession) -> VpnNode | None:
     nodes = (
         await session.scalars(
             select(VpnNode)
-            .where(VpnNode.is_active.is_(True))
+            .where(
+                VpnNode.is_active.is_(True),
+                VpnNode.id.not_in(settings.admin_reserved_node_ids),
+            )
             .order_by(VpnNode.id)
         )
     ).all()
@@ -104,9 +127,6 @@ async def create_node(
     activate: bool,
 ) -> VpnNode:
     now = utcnow()
-    if activate:
-        await deactivate_all_nodes(session)
-
     node = VpnNode(
         title=title.strip(),
         mode=mode,
@@ -134,7 +154,6 @@ async def activate_node(session: AsyncSession, node_id: int) -> VpnNode:
     if node is None:
         raise ValueError("Node not found")
 
-    await deactivate_all_nodes(session)
     node.is_active = True
     node.updated_at = utcnow()
     await session.commit()

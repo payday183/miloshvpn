@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     bot_token: str = ""
     bot_username: str = ""
     admin_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
+    admin_reserved_node_ids: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [1])
     admin_web_token: str = ""
     admin_panel_url: str = "http://localhost:8081/admin"
 
@@ -54,9 +55,9 @@ class Settings(BaseSettings):
     expired_subscription_cleanup_enabled: bool = True
     expired_subscription_cleanup_interval_seconds: int = 300
 
-    @field_validator("admin_ids", mode="before")
+    @field_validator("admin_ids", "admin_reserved_node_ids", mode="before")
     @classmethod
-    def parse_admin_ids(cls, value: object) -> list[int]:
+    def parse_int_list(cls, value: object) -> list[int]:
         if value is None or value == "":
             return []
         if isinstance(value, list):
