@@ -103,9 +103,14 @@ async def manually_confirm_order(
 
     user = order.user
     was_already_paid = order.status == "paid"
+    was_provisional = order.status == "provisional"
     repaired_key = False
 
-    if was_already_paid:
+    if was_already_paid or was_provisional:
+        if was_provisional:
+            order.status = "paid"
+            order.moderation_status = "confirmed"
+            order.provisional_expires_at = None
         subscription = await get_active_subscription(session, user.id)
         key = await get_active_key(session, user.id)
         if subscription is not None and key is None:

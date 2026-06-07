@@ -16,6 +16,7 @@ ADMIN_ROTATE_FREE = "Пересоздать free key"
 ADMIN_POST_FREE = "Опубликовать free key"
 ADMIN_PENDING = "Ожидающие оплаты"
 ADMIN_FIND_ORDER = "Найти оплату"
+ADMIN_PAYMENT_MODE = "Система оплаты"
 ADMIN_CREATE_KEY = "Создать admin key"
 ADMIN_KEYS = "Личные ключи"
 ADMIN_MAIN_MENU = "Главное меню"
@@ -37,7 +38,7 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
         keyboard=[
             [KeyboardButton(text=ADMIN_STATS), KeyboardButton(text=ADMIN_PENDING)],
             [KeyboardButton(text=ADMIN_FIND_ORDER), KeyboardButton(text=ADMIN_KEYS)],
-            [KeyboardButton(text=ADMIN_CREATE_KEY)],
+            [KeyboardButton(text=ADMIN_PAYMENT_MODE), KeyboardButton(text=ADMIN_CREATE_KEY)],
             [KeyboardButton(text=ADMIN_ROTATE_FREE), KeyboardButton(text=ADMIN_POST_FREE)],
             [KeyboardButton(text=PROFILE), KeyboardButton(text=ADMIN_MAIN_MENU)],
         ],
@@ -69,6 +70,37 @@ def check_payment_keyboard(order_id: int, payment_url: str | None = None) -> Inl
     )
     return InlineKeyboardMarkup(
         inline_keyboard=buttons
+    )
+
+
+def manual_sbp_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="СБП", callback_data=f"manual_sbp:{order_id}")],
+            [InlineKeyboardButton(text="Проверить оплату", callback_data=f"check_payment:{order_id}")],
+            [InlineKeyboardButton(text="Купить другой тариф", callback_data="show_plans")],
+        ]
+    )
+
+
+def payment_provider_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="DonationAlerts", callback_data="admin_paymode_select:donationalerts")],
+            [InlineKeyboardButton(text="Ручная SBP", callback_data="admin_paymode_select:manual_sbp")],
+            [InlineKeyboardButton(text="Гибрид", callback_data="admin_paymode_select:hybrid")],
+        ]
+    )
+
+
+def confirm_payment_provider_keyboard(provider: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да", callback_data=f"admin_paymode_confirm:{provider}"),
+                InlineKeyboardButton(text="Нет", callback_data="admin_paymode_cancel"),
+            ]
+        ]
     )
 
 

@@ -4,6 +4,7 @@ from decimal import Decimal
 from app.config import get_settings
 from app.models import Order, Plan, Subscription, User, VpnKey
 from app.services.manual_orders import ManualOrderGrantResult
+from app.services.payment_modes import payment_provider_label
 from app.services.vpn import TRIAL_PLAN_CODE
 
 
@@ -89,7 +90,96 @@ def payment_text(order: Order, plan: Plan) -> str:
         "\n4. Если DonationAlerts открыл EUR или 10 ₽, выбери RUB и впиши сумму тарифа руками.\n"
         "\n"
         "5. После оплаты вернись в бот и нажми <b>Проверить оплату</b>.\n\n"
-        "Важно: backend засчитает только правильную сумму в RUB/RUR и именно этот код."
+        "Важно: backend засчитает только правильную сумму в RUB/RUR и именно этот код.\n\n"
+        "MiloshVPN работает на поддержку проекта: суммы помогают оплачивать серверы и держать сервис живым."
+    )
+
+
+def hybrid_payment_text(order: Order, plan: Plan) -> str:
+    return (
+        f"{payment_text(order, plan)}\n\n"
+        "⚡ Сейчас включён гибридный режим: после кнопки <b>Проверить оплату</b> "
+        "бот сразу выдаст временный доступ, а админ спокойно сверит оплату."
+    )
+
+
+def manual_sbp_payment_text(order: Order, plan: Plan) -> str:
+    return (
+        "🧾 Заказ готов\n\n"
+        f"Тариф: <b>{escape(plan.title)}</b>\n"
+        f"\nСумма: <b>{format_price(Decimal(order.amount_rub))} RUB</b>\n\n"
+        "Выберите способ оплаты ниже.\n\n"
+        "После оплаты нажмите <b>Проверить оплату</b>. Бот выдаст временный доступ, "
+        "а админ проверит платёж и закрепит тариф."
+    )
+
+
+def manual_sbp_qr_requested_text(order: Order) -> str:
+    note = escape(order.moderation_note or order.payment_code)
+    return (
+        "Спасибо за выбор 💙\n\n"
+        "Сейчас формируется QR-код СБП для оплаты.\n\n"
+        "Когда QR придёт сюда, оплатите сумму заказа и в назначении/комментарии используйте:\n"
+        f"<code>{note}</code>"
+    )
+
+
+def admin_qr_request_text(order: Order) -> str:
+    user = order.user
+    username = f"@{escape(user.username)}" if user and user.username else "без username"
+    note = escape(order.moderation_note or order.payment_code)
+    return (
+        "🧾 Пользователь выбрал оплату СБП\n\n"
+        f"Заказ: <code>{order.id}</code>\n"
+        f"Пользователь: {username}\n"
+        f"Telegram ID: <code>{user.telegram_id if user else '?'}</code>\n"
+        f"Тариф: <b>{escape(order.plan_code)}</b>\n"
+        f"Сумма: {format_price(Decimal(order.amount_rub))} RUB\n\n"
+        "Слова/комментарий для платежа:\n"
+        f"<code>{note}</code>"
+    )
+
+
+def admin_review_request_text(order: Order) -> str:
+    user = order.user
+    username = f"@{escape(user.username)}" if user and user.username else "без username"
+    note = escape(order.moderation_note or order.payment_code)
+    return (
+        "🔎 Пользователь нажал Проверить оплату\n\n"
+        f"Заказ: <code>{order.id}</code>\n"
+        f"Пользователь: {username}\n"
+        f"Telegram ID: <code>{user.telegram_id if user else '?'}</code>\n"
+        f"Тариф: <b>{escape(order.plan_code)}</b>\n"
+        f"Сумма: {format_price(Decimal(order.amount_rub))} RUB\n"
+        f"Провайдер: <b>{escape(payment_provider_label(order.payment_provider))}</b>\n\n"
+        "Код/слова платежа:\n"
+        f"<code>{note}</code>\n\n"
+        "Проверьте оплату и выберите решение."
+    )
+
+
+def payment_mode_admin_text(active_provider: str) -> str:
+    return (
+        "💳 Система оплаты\n\n"
+        f"Сейчас активна: <b>{escape(payment_provider_label(active_provider))}</b>\n\n"
+        "Выберите, как бот будет принимать новые заказы."
+    )
+
+
+def payment_mode_confirm_text(provider: str) -> str:
+    return f"Сделать системой оплаты <b>{escape(payment_provider_label(provider))}</b>?"
+
+
+def payment_mode_applied_text(provider: str) -> str:
+    return f"Готово. Теперь новые заказы идут через <b>{escape(payment_provider_label(provider))}</b>."
+
+
+def moderation_rejected_user_text() -> str:
+    return (
+        "Извините, ваша оплата не прошла или вы не оплатили заказ.\n\n"
+        "Свяжитесь с поддержкой, мы поможем и посмотрим скриншот оплаты. "
+        "Если вы оплатили, но забыли вставить код или слова, разберёмся.\n\n"
+        "С уважением, MiloshVPN 💙"
     )
 
 
@@ -206,7 +296,8 @@ def policy_text() -> str:
         "2. Trial даётся один раз на 7 дней и имеет лимит трафика.\n"
         "3. Торренты, Tor, спам, сканирование и жёсткая нагрузка запрещены.\n"
         "4. Оплата засчитывается только с правильной суммой и персональным кодом.\n"
-        "5. Если ключ начинает вредить серверу, его могут отключить."
+        "5. Мы не продаём интернет как товар: суммы — это поддержка проекта, чтобы серверы работали стабильно.\n"
+        "6. Если ключ начинает вредить серверу, его могут отключить."
     )
 
 
@@ -230,6 +321,7 @@ def admin_help_text() -> str:
         "Что можно сделать здесь:\n"
         "• посмотреть статистику и ожидающие оплаты;\n"
         "• найти оплату по коду или Telegram ID и выдать ключ вручную;\n"
+        "• выбрать систему оплаты для новых заказов;\n"
         "• увидеть личные ключи и удалить лишний;\n"
         "• создать admin key без оплаты;\n"
         "• управлять бесплатным публичным ключом.\n\n"

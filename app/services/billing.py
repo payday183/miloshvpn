@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import DonationEvent, Order, Plan, User
+from app.services.payment_modes import PAYMENT_PROVIDER_DONATIONALERTS, get_active_payment_provider
 from app.services.vpn import create_or_extend_subscription
 from app.timeutils import utcnow
 
@@ -33,10 +34,16 @@ async def create_order(session: AsyncSession, user: User, plan_code: str) -> Ord
         raise RuntimeError("Тариф недоступен")
 
     now = utcnow()
+    payment_provider = await get_active_payment_provider(session)
     pending_orders = (
         await session.scalars(
             select(Order)
-            .where(Order.user_id == user.id, Order.status == "pending", Order.expires_at > now)
+            .where(
+                Order.user_id == user.id,
+                Order.status == "pending",
+                Order.payment_provider == payment_provider,
+                Order.expires_at > now,
+            )
             .order_by(Order.created_at.desc())
         )
     ).all()
@@ -64,6 +71,8 @@ async def create_order(session: AsyncSession, user: User, plan_code: str) -> Ord
         payment_code=payment_code,
         amount_rub=plan.price_rub,
         status="pending",
+        payment_provider=payment_provider,
+        moderation_status="pending" if payment_provider != PAYMENT_PROVIDER_DONATIONALERTS else None,
         created_at=now,
         expires_at=now + timedelta(hours=12),
     )
@@ -176,7 +185,11 @@ async def process_donation(session: AsyncSession, donation: dict[str, Any]) -> b
 
     order = await session.scalar(
         select(Order)
-        .where(Order.payment_code == payment_code.value, Order.status == "pending")
+        .where(
+            Order.payment_code == payment_code.value,
+            Order.status == "pending",
+            Order.payment_provider == PAYMENT_PROVIDER_DONATIONALERTS,
+        )
         .with_for_update()
     )
     if order is None:

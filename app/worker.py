@@ -10,6 +10,7 @@ from app.services.billing import poll_donations
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
 from app.services.node_monitor import refresh_all_nodes
 from app.services.payment_notifications import notify_paid_orders
+from app.services.payment_moderation import expire_unconfirmed_orders
 from app.services.public_keys import (
     mark_public_key_posted,
     normalize_public_key_chat_id,
@@ -108,12 +109,14 @@ async def expired_subscription_loop() -> None:
                 try:
                     expired = await expire_subscriptions(session)
                     retry = await retry_expired_key_revokes(session)
+                    unconfirmed = await expire_unconfirmed_orders(session)
                     total_revoked = expired["revoked_keys"] + retry["revoked_keys"]
                     total_failed = expired["failed_revokes"] + retry["failed_revokes"]
-                    if expired["expired_subscriptions"] or total_revoked or total_failed:
+                    if expired["expired_subscriptions"] or unconfirmed or total_revoked or total_failed:
                         logger.info(
-                            "Expired subscriptions cleanup: expired=%s revoked=%s failed=%s",
+                            "Expired subscriptions cleanup: expired=%s unconfirmed=%s revoked=%s failed=%s",
                             expired["expired_subscriptions"],
+                            unconfirmed,
                             total_revoked,
                             total_failed,
                         )

@@ -23,6 +23,12 @@ from app.services.manual_orders import ManualOrderError, ManualOrderGrantResult,
 from app.services.node_monitor import format_bytes, local_key_counts, refresh_all_nodes, refresh_node_status
 from app.services.nodes import activate_node, create_node, disable_node, list_nodes
 from app.services.payment_notifications import notify_paid_order
+from app.services.payment_modes import (
+    get_active_payment_provider,
+    list_payment_providers,
+    payment_provider_label,
+    set_active_payment_provider,
+)
 from app.services.public_keys import rotate_public_key
 from app.services.stats import collect_stats
 from app.services.vpn import list_active_private_keys, revoke_private_key
@@ -86,7 +92,10 @@ async def admin_panel(
     subscriptions = await active_subscriptions(session)
     pending_orders = await latest_pending_orders(session)
     private_keys = await list_active_private_keys(session, limit=100)
-    return HTMLResponse(render_admin_page(stats, nodes, node_counts, subscriptions, pending_orders, private_keys, token))
+    payment_provider = await get_active_payment_provider(session)
+    return HTMLResponse(
+        render_admin_page(stats, nodes, node_counts, subscriptions, pending_orders, private_keys, token, payment_provider)
+    )
 
 
 @router.post("/admin/nodes")
@@ -167,6 +176,23 @@ async def poll_donations_action(
     _: None = Depends(require_admin_token),
 ) -> RedirectResponse:
     await poll_donations(session)
+    return redirect_to_admin(request)
+
+
+@router.post("/admin/payment-mode")
+async def set_payment_mode_action(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> RedirectResponse:
+    form = await request.form()
+    provider = str(form.get("provider") or "").strip()
+    try:
+        await set_active_payment_provider(session, provider)
+        await session.commit()
+    except ValueError:
+        await session.rollback()
+        raise HTTPException(status_code=400, detail="Unknown payment provider")
     return redirect_to_admin(request)
 
 
@@ -576,6 +602,7 @@ def render_admin_page(
     pending_orders: list[Order],
     private_keys: list[VpnKey],
     token: str,
+    payment_provider: str,
 ) -> str:
     settings = get_settings()
     token_qs = f"?{urlencode({'token': token})}" if token else ""
@@ -591,6 +618,10 @@ def render_admin_page(
         "Личных активных ключей пока нет"
     )
     order_rows = "\n".join(render_order_row(order, token_qs) for order in pending_orders) or table_empty("Ожидающих оплат нет")
+    payment_provider_buttons = "\n".join(
+        render_payment_provider_button(provider.code, provider.label, payment_provider, token_qs)
+        for provider in list_payment_providers()
+    )
     return f"""<!doctype html>
 <html lang="ru">
   <head>
@@ -751,6 +782,12 @@ def render_admin_page(
         {render_stat("Оплаченные заказы", stats["paid_orders"])}
         {render_stat("Ожидают оплаты", stats["pending_orders"])}
         {render_stat("Активные ключи", stats["active_keys"])}
+      </section>
+
+      <section class="panel">
+        <h2>Система оплаты</h2>
+        <p class="muted" style="margin-top: 0;">Сейчас активна: <strong>{escape(payment_provider_label(payment_provider))}</strong></p>
+        <div class="actions">{payment_provider_buttons}</div>
       </section>
 
       <section class="panel">
@@ -1188,6 +1225,17 @@ def admin_simple_page_css() -> str:
 
 def render_stat(label: str, value: int) -> str:
     return f'<div class="stat"><span>{escape(label)}</span><strong>{value}</strong></div>'
+
+
+def render_payment_provider_button(code: str, label: str, active_provider: str, token_qs: str) -> str:
+    css_class = "secondary" if code != active_provider else ""
+    suffix = " ✓" if code == active_provider else ""
+    return (
+        f'<form method="post" action="/admin/payment-mode{token_qs}">'
+        f'<input type="hidden" name="provider" value="{escape(code)}">'
+        f'<button class="{css_class}" type="submit">{escape(label)}{suffix}</button>'
+        "</form>"
+    )
 
 
 def render_node_row(node: VpnNode, counts: dict[str, int], token_qs: str) -> str:

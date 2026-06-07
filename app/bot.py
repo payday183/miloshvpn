@@ -8,6 +8,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 import httpx
 from sqlalchemy import func, select
+from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.db import SessionLocal, init_db
@@ -16,6 +17,20 @@ from app.services.admin_auth import build_admin_profile_url
 from app.services.admin_keys import create_admin_key
 from app.services.billing import create_order, poll_donations
 from app.services.manual_orders import ManualOrderError, manually_confirm_order, search_orders_for_admin
+from app.services.payment_modes import (
+    PAYMENT_PROVIDER_DONATIONALERTS,
+    PAYMENT_PROVIDER_HYBRID,
+    PAYMENT_PROVIDER_MANUAL_SBP,
+    get_active_payment_provider,
+    set_active_payment_provider,
+)
+from app.services.payment_moderation import (
+    confirm_moderated_order,
+    ensure_order_note,
+    get_admin_chat_ids,
+    grant_provisional_access,
+    reject_moderated_order,
+)
 from app.services.payment_links import donation_url_for_order
 from app.services.payment_notifications import notify_paid_order, notify_paid_orders
 from app.services.public_keys import (
@@ -41,9 +56,18 @@ from app.tg.texts import (
     admin_help_text,
     admin_key_text,
     admin_manual_grant_result_text,
+    admin_qr_request_text,
     admin_order_result_text,
     admin_order_search_prompt_text,
+    admin_review_request_text,
+    hybrid_payment_text,
     instruction_text,
+    manual_sbp_payment_text,
+    manual_sbp_qr_requested_text,
+    moderation_rejected_user_text,
+    payment_mode_admin_text,
+    payment_mode_applied_text,
+    payment_mode_confirm_text,
     payment_text,
     payment_success_text,
     policy_text,
@@ -58,6 +82,7 @@ from app.timeutils import utcnow
 logging.basicConfig(level=logging.INFO)
 router = Router()
 ADMIN_ORDER_QUERY_RE = re.compile(r"(MILO-[0-9]+-[A-Z0-9]{5,8}|#?[0-9]{1,20})", re.IGNORECASE)
+PENDING_QR_UPLOADS: dict[int, int] = {}
 
 
 def visible_purchase_plans(plans: list[Plan], admin: bool) -> list[Plan]:
@@ -192,12 +217,62 @@ async def buy_plan(callback: CallbackQuery) -> None:
             await callback.answer("Тариф недоступен.", show_alert=True)
             return
         order = await create_order(session, user, plan_code)
-    await callback.message.answer(
-        payment_text(order, plan),
-        reply_markup=kb.check_payment_keyboard(order.id, donation_url_for_order(order)),
-        parse_mode=ParseMode.HTML,
-    )
+    if order.payment_provider == PAYMENT_PROVIDER_MANUAL_SBP:
+        await callback.message.answer(
+            manual_sbp_payment_text(order, plan),
+            reply_markup=kb.manual_sbp_keyboard(order.id),
+            parse_mode=ParseMode.HTML,
+        )
+    elif order.payment_provider == PAYMENT_PROVIDER_HYBRID:
+        await callback.message.answer(
+            hybrid_payment_text(order, plan),
+            reply_markup=kb.check_payment_keyboard(order.id, donation_url_for_order(order)),
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        await callback.message.answer(
+            payment_text(order, plan),
+            reply_markup=kb.check_payment_keyboard(order.id, donation_url_for_order(order)),
+            parse_mode=ParseMode.HTML,
+        )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("manual_sbp:"))
+async def manual_sbp_selected(callback: CallbackQuery, bot: Bot) -> None:
+    order_id = int(callback.data.split(":", 1)[1])
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        order = await session.scalar(
+            select(Order)
+            .options(selectinload(Order.user), selectinload(Order.plan))
+            .where(Order.id == order_id)
+            .with_for_update()
+        )
+        if order is None or order.user_id != user.id:
+            await session.commit()
+            await callback.answer("Заказ не найден.", show_alert=True)
+            return
+        await ensure_order_note(session, order)
+        order.moderation_status = "qr_requested"
+        await session.commit()
+
+    await callback.message.answer(manual_sbp_qr_requested_text(order), parse_mode=ParseMode.HTML)
+    await send_admin_order_message(
+        bot,
+        admin_qr_request_text(order),
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="Отправить QR code", callback_data=f"admin_qr_upload:{order.id}")]
+            ]
+        ),
+    )
+    await callback.answer("СБП выбран")
 
 
 @router.callback_query(F.data.startswith("check_payment:"))
@@ -221,7 +296,34 @@ async def check_payment(callback: CallbackQuery, bot: Bot) -> None:
             order.notified_at = order.notified_at or utcnow()
             await session.commit()
             await callback.message.answer(payment_success_text(subscription_obj, key), parse_mode=ParseMode.HTML)
+        elif order.status == "provisional":
+            subscription_obj = await get_active_subscription(session, user.id)
+            key = await get_active_key(session, user.id)
+            await session.commit()
+            await callback.message.answer(payment_success_text(subscription_obj, key), parse_mode=ParseMode.HTML)
         elif order.status == "pending":
+            if order.payment_provider in {PAYMENT_PROVIDER_MANUAL_SBP, PAYMENT_PROVIDER_HYBRID}:
+                await session.commit()
+                async with SessionLocal() as grant_session:
+                    result = await grant_provisional_access(grant_session, order.id)
+                    await grant_session.commit()
+                await callback.message.answer(
+                    "⏳ Проверка запущена.\n\n"
+                    "Спасибо за поддержку. Админ сверит оплату, а доступ уже готов.",
+                    parse_mode=ParseMode.HTML,
+                )
+                await callback.message.answer(
+                    payment_success_text(result.subscription, result.key),
+                    parse_mode=ParseMode.HTML,
+                )
+                await send_admin_order_message(
+                    bot,
+                    admin_review_request_text(result.order),
+                    admin_review_keyboard(result.order.id),
+                )
+                await callback.answer("Проверка запущена")
+                return
+
             await session.commit()
             await callback.message.answer(
                 "⏳ Ваша оплата проверяется.\n\n"
@@ -258,6 +360,27 @@ async def check_payment(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer()
 
 
+def admin_review_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Оплатил", callback_data=f"admin_review_confirm:{order_id}"),
+                InlineKeyboardButton(text="❌ Не оплатил", callback_data=f"admin_review_reject:{order_id}"),
+            ]
+        ]
+    )
+
+
+async def send_admin_order_message(bot: Bot, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+    async with SessionLocal() as session:
+        admin_ids = await get_admin_chat_ids(session)
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(admin_id, text, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+        except Exception:
+            logging.exception("Failed to send admin moderation message to %s", admin_id)
+
+
 @router.message(F.text == kb.HELP)
 async def help_text(message: Message) -> None:
     _, admin = await current_user(message)
@@ -285,6 +408,76 @@ async def admin_panel(message: Message) -> None:
     await message.answer(admin_help_text(), reply_markup=kb.admin_keyboard(), parse_mode=ParseMode.HTML)
 
 
+@router.message(F.text == kb.ADMIN_PAYMENT_MODE)
+async def admin_payment_mode(message: Message) -> None:
+    _, admin = await current_user(message)
+    if not admin:
+        return
+    async with SessionLocal() as session:
+        provider = await get_active_payment_provider(session)
+    await message.answer(
+        payment_mode_admin_text(provider),
+        reply_markup=kb.payment_provider_keyboard(),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.callback_query(F.data.startswith("admin_paymode_select:"))
+async def admin_payment_mode_select(callback: CallbackQuery) -> None:
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        admin = await is_admin(session, user.telegram_id)
+        await session.commit()
+    if not admin:
+        await callback.answer("Админка закрыта.", show_alert=True)
+        return
+
+    provider = callback.data.split(":", 1)[1]
+    await callback.message.answer(
+        payment_mode_confirm_text(provider),
+        reply_markup=kb.confirm_payment_provider_keyboard(provider),
+        parse_mode=ParseMode.HTML,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_paymode_confirm:"))
+async def admin_payment_mode_confirm(callback: CallbackQuery) -> None:
+    provider = callback.data.split(":", 1)[1]
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        admin = await is_admin(session, user.telegram_id)
+        if not admin:
+            await callback.answer("Админка закрыта.", show_alert=True)
+            return
+        try:
+            await set_active_payment_provider(session, provider)
+            await session.commit()
+        except ValueError:
+            await session.rollback()
+            await callback.answer("Неизвестная система оплаты.", show_alert=True)
+            return
+
+    await callback.message.answer(payment_mode_applied_text(provider), parse_mode=ParseMode.HTML, reply_markup=kb.admin_keyboard())
+    await callback.answer("Сохранено")
+
+
+@router.callback_query(F.data == "admin_paymode_cancel")
+async def admin_payment_mode_cancel(callback: CallbackQuery) -> None:
+    await callback.answer("Отменено")
+    await callback.message.answer("Ок, систему оплаты не меняю.", reply_markup=kb.admin_keyboard())
+
+
 @router.message(F.text == kb.ADMIN_MAIN_MENU)
 async def back_to_main_menu(message: Message) -> None:
     _, admin = await current_user(message)
@@ -310,6 +503,123 @@ async def create_admin_key_command(message: Message) -> None:
         await session.refresh(key)
 
     await message.answer(admin_key_text(key), parse_mode=ParseMode.HTML, reply_markup=kb.admin_keyboard())
+
+
+@router.callback_query(F.data.startswith("admin_qr_upload:"))
+async def admin_qr_upload_start(callback: CallbackQuery) -> None:
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        admin = await is_admin(session, user.telegram_id)
+        await session.commit()
+    if not admin:
+        await callback.answer("Админка закрыта.", show_alert=True)
+        return
+
+    order_id = int(callback.data.split(":", 1)[1])
+    PENDING_QR_UPLOADS[callback.from_user.id] = order_id
+    await callback.message.answer(
+        f"Отправьте QR code картинкой или файлом для заказа <code>{order_id}</code>.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb.admin_keyboard(),
+    )
+    await callback.answer("Жду QR")
+
+
+@router.message(F.photo | F.document)
+async def admin_qr_upload_receive(message: Message, bot: Bot) -> None:
+    order_id = PENDING_QR_UPLOADS.get(message.from_user.id)
+    if order_id is None:
+        return
+
+    async with SessionLocal() as session:
+        admin_user = await get_or_create_user(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
+        admin = await is_admin(session, admin_user.telegram_id)
+        order = await session.scalar(
+            select(Order)
+            .options(selectinload(Order.user))
+            .where(Order.id == order_id)
+            .with_for_update()
+        )
+        if not admin or order is None or order.user is None:
+            await session.commit()
+            PENDING_QR_UPLOADS.pop(message.from_user.id, None)
+            return
+
+        file_id = message.photo[-1].file_id if message.photo else message.document.file_id
+        order.manual_qr_file_id = file_id
+        order.moderation_status = "qr_sent"
+        await session.commit()
+
+    caption = (
+        "QR-код СБП для оплаты готов.\n\n"
+        "После оплаты нажмите <b>Проверить оплату</b> в сообщении заказа."
+    )
+    try:
+        if message.photo:
+            await bot.send_photo(order.user.telegram_id, file_id, caption=caption, parse_mode=ParseMode.HTML)
+        else:
+            await bot.send_document(order.user.telegram_id, file_id, caption=caption, parse_mode=ParseMode.HTML)
+        await message.answer(
+            f"QR code доставлен пользователю <code>{order.user.telegram_id}</code>.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.admin_keyboard(),
+        )
+    finally:
+        PENDING_QR_UPLOADS.pop(message.from_user.id, None)
+
+
+@router.callback_query(F.data.startswith("admin_review_confirm:"))
+async def admin_review_confirm(callback: CallbackQuery, bot: Bot) -> None:
+    order_id = int(callback.data.split(":", 1)[1])
+    async with SessionLocal() as session:
+        admin_user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        admin = await is_admin(session, admin_user.telegram_id)
+        if not admin:
+            await callback.answer("Админка закрыта.", show_alert=True)
+            return
+        result = await confirm_moderated_order(session, order_id)
+        await session.commit()
+
+    await bot.send_message(result.order.user.telegram_id, "✅ Оплата подтверждена. Тариф закреплён, спасибо за поддержку!")
+    await callback.message.answer(f"Заказ <code>{order_id}</code> подтверждён.", parse_mode=ParseMode.HTML, reply_markup=kb.admin_keyboard())
+    await callback.answer("Подтверждено")
+
+
+@router.callback_query(F.data.startswith("admin_review_reject:"))
+async def admin_review_reject(callback: CallbackQuery, bot: Bot) -> None:
+    order_id = int(callback.data.split(":", 1)[1])
+    async with SessionLocal() as session:
+        admin_user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        admin = await is_admin(session, admin_user.telegram_id)
+        if not admin:
+            await callback.answer("Админка закрыта.", show_alert=True)
+            return
+        result = await reject_moderated_order(session, order_id)
+        await session.commit()
+
+    await bot.send_message(result.order.user.telegram_id, moderation_rejected_user_text())
+    await callback.message.answer(f"Заказ <code>{order_id}</code> отклонён, доступ отозван.", parse_mode=ParseMode.HTML, reply_markup=kb.admin_keyboard())
+    await callback.answer("Отклонено")
 
 
 @router.message(Command("find_order"))

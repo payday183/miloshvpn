@@ -14,6 +14,15 @@ async def run_lightweight_migrations(conn: AsyncConnection) -> None:
             "END $$;"
         )
     )
+    await conn.execute(
+        text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_provider VARCHAR(32) DEFAULT 'donationalerts'")
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_orders_payment_provider ON orders (payment_provider)"))
+    await conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS moderation_status VARCHAR(32)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_orders_moderation_status ON orders (moderation_status)"))
+    await conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS moderation_note TEXT"))
+    await conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS manual_qr_file_id VARCHAR(255)"))
+    await conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS provisional_expires_at TIMESTAMP WITH TIME ZONE"))
     await conn.execute(text("ALTER TABLE vpn_nodes ADD COLUMN IF NOT EXISTS status VARCHAR(32) DEFAULT 'unknown'"))
     await conn.execute(text("ALTER TABLE vpn_nodes ADD COLUMN IF NOT EXISTS last_checked_at TIMESTAMP WITH TIME ZONE"))
     await conn.execute(text("ALTER TABLE vpn_nodes ADD COLUMN IF NOT EXISTS last_error TEXT"))
