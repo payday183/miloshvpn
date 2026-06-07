@@ -14,6 +14,8 @@ from app.timeutils import utcnow
 
 PUBLIC_KEY_LAST_POSTED_AT = "public_key_last_posted_at"
 PUBLIC_KEY_TEMPLATE_INDEX = "public_key_template_index"
+PUBLIC_KEY_LIFETIME_HOURS = 24
+PUBLIC_KEY_TRAFFIC_GB = 500
 
 
 async def get_active_public_key(session: AsyncSession) -> VpnKey | None:
@@ -47,13 +49,13 @@ async def rotate_public_key(session: AsyncSession) -> VpnKey:
         key.active = False
         key.revoked_at = now
 
-    expires_at = now + timedelta(hours=max(1, settings.public_key_rotate_hours))
+    expires_at = now + timedelta(hours=PUBLIC_KEY_LIFETIME_HOURS)
     x3ui = X3UIClient(settings, node=node)
     client = await x3ui.create_client(
         email=f"milosh_free_{now:%Y%m%d_%H%M}",
         telegram_id=None,
         expires_at=expires_at,
-        traffic_gb=max(1, settings.public_key_traffic_gb),
+        traffic_gb=PUBLIC_KEY_TRAFFIC_GB,
     )
     key = VpnKey(
         node_id=node.id if node else None,
@@ -87,8 +89,41 @@ async def seconds_until_next_public_key_post(session: AsyncSession, now: datetim
     if last_posted_at is None:
         return 0
 
-    next_post_at = last_posted_at + timedelta(hours=max(1, settings.public_key_rotate_hours))
+    next_post_at = last_posted_at + timedelta(hours=PUBLIC_KEY_LIFETIME_HOURS)
     return max(0, int((next_post_at - now).total_seconds()))
+
+
+async def expire_public_keys(session: AsyncSession, *, limit: int = 100) -> dict[str, int]:
+    now = utcnow()
+    keys = (
+        await session.scalars(
+            select(VpnKey)
+            .options(selectinload(VpnKey.node))
+            .where(
+                VpnKey.key_type == "public",
+                VpnKey.active.is_(True),
+                VpnKey.expires_at <= now,
+            )
+            .order_by(VpnKey.expires_at)
+            .limit(limit)
+        )
+    ).all()
+
+    revoked_keys = 0
+    failed_revokes = 0
+    for key in keys:
+        try:
+            await X3UIClient(node=key.node).revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+        except Exception:
+            failed_revokes += 1
+            continue
+
+        key.active = False
+        key.revoked_at = now
+        revoked_keys += 1
+
+    await session.commit()
+    return {"revoked_keys": revoked_keys, "failed_revokes": failed_revokes}
 
 
 async def get_public_key_last_posted_at(session: AsyncSession) -> datetime | None:
@@ -170,13 +205,12 @@ async def set_setting_value(session: AsyncSession, key: str, value: str) -> None
 
 
 def public_key_post_text(key: VpnKey, template_body: str | None = None) -> str:
-    settings = get_settings()
     expires = key.expires_at.strftime("%d.%m %H:%M UTC") if key.expires_at else "через 24 часа"
     vless_uri = escape(key.vless_uri)
     context = {
         "expires": expires,
-        "hours": str(max(1, settings.public_key_rotate_hours)),
-        "traffic_gb": str(max(1, settings.public_key_traffic_gb)),
+        "hours": str(PUBLIC_KEY_LIFETIME_HOURS),
+        "traffic_gb": str(PUBLIC_KEY_TRAFFIC_GB),
         "key": vless_uri,
         "key_block": f"<code>{vless_uri}</code>",
     }
