@@ -182,15 +182,13 @@ async def create_or_extend_subscription(session: AsyncSession, user: User, plan_
 
     now = utcnow()
     subscription = await get_active_subscription(session, user.id)
-    base_expires_at = None
     if subscription is not None and subscription.plan_code == TRIAL_PLAN_CODE:
-        base_expires_at = subscription.expires_at
         subscription.status = "upgraded"
         subscription = None
 
     if subscription is None:
         starts_at = now
-        expires_at = max(base_expires_at or now, now) + timedelta(days=plan.days)
+        expires_at = now + timedelta(days=plan.days)
         subscription = Subscription(
             user_id=user.id,
             plan_code=plan.code,
