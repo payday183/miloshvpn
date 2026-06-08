@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.models import PublicKeyPostTemplate, Setting, VpnKey
-from app.services.nodes import select_node_for_key
+from app.services.nodes import get_active_node, select_node_for_key
 from app.services.x3ui import X3UIClient
 from app.timeutils import utcnow
 
@@ -34,7 +34,9 @@ async def get_active_public_key(session: AsyncSession) -> VpnKey | None:
 async def rotate_public_key(session: AsyncSession) -> VpnKey:
     settings = get_settings()
     now = utcnow()
-    node = await select_node_for_key(session)
+    node = await select_node_for_key(session) or await get_active_node(session)
+    if node is None and settings.x3ui_mode != "mock":
+        raise RuntimeError("No available VPN node for public key")
 
     keys = (
         await session.scalars(
