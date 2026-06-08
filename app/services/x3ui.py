@@ -99,6 +99,7 @@ class X3UIClient:
                 json={
                     "client": {
                         "email": email,
+                        "id": client_uuid,
                         "uuid": client_uuid,
                         "subId": client_uuid.replace("-", "")[:16],
                         "totalGB": total_gb,
@@ -228,7 +229,7 @@ class X3UIClient:
         payload = self._payload_data(response)
         if isinstance(payload, dict):
             client_payload = payload.get("client") if isinstance(payload.get("client"), dict) else payload
-            uuid = client_payload.get("uuid")
+            uuid = client_payload.get("uuid") or client_payload.get("id")
             if isinstance(uuid, str) and uuid:
                 return uuid
         return None
