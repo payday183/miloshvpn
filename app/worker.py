@@ -12,7 +12,6 @@ from app.services.node_monitor import refresh_all_nodes
 from app.services.payment_notifications import notify_paid_orders
 from app.services.payment_moderation import expire_unconfirmed_orders
 from app.services.public_keys import (
-    PUBLIC_KEY_LIFETIME_HOURS,
     expire_public_keys,
     mark_public_key_posted,
     normalize_public_key_chat_id,
@@ -82,7 +81,7 @@ async def public_key_loop() -> None:
                             await bot.send_message(chat_id, text, parse_mode="HTML")
                             await mark_public_key_posted(session)
                             logger.info("Published public VPN key: %s", key.email)
-                            sleep_seconds = PUBLIC_KEY_LIFETIME_HOURS * 60 * 60
+                            sleep_seconds = max(60, await seconds_until_next_public_key_post(session))
                     else:
                         sleep_seconds = max(60, seconds_left)
                 except Exception:

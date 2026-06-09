@@ -223,7 +223,7 @@ Then set:
 ADMIN_REALITY_INBOUND_ID=2
 ADMIN_REALITY_PUBLIC_HOST=admin-server-ip
 ADMIN_REALITY_PUBLIC_PORT=443
-ADMIN_REALITY_VLESS_QUERY=type=tcp&security=reality&encryption=none&fp=chrome&sni=www.bosch.com&pbk=PUBLIC_KEY&sid=SHORT_ID&spx=%2F
+ADMIN_REALITY_VLESS_QUERY=type=tcp&security=reality&encryption=none&fp=chrome&sni=www.debian.org&pbk=PUBLIC_KEY&sid=SHORT_ID&spx=%2F
 ```
 
 Use `/admin_reality_key` or the `Создать Reality test key` button in `/admin` to issue test keys. `/admin_key` stays on the regular admin VLESS inbound. User, trial and public 24h keys are still issued from active non-reserved nodes, so the France user node stays on `type=tcp&security=none`.
@@ -232,12 +232,13 @@ For a later Vision test, add `flow=xtls-rprx-vision` to `ADMIN_REALITY_VLESS_QUE
 
 ## Public Free Key
 
-The worker rotates the public key every 24 hours.
+The worker rotates and posts the public key daily at the configured Moscow time. By default the key lives for 24 hours, has a 500 GB traffic limit, and is posted at 14:00 MSK.
 
 ```env
 PUBLIC_KEY_ENABLED=true
 PUBLIC_KEY_ROTATE_HOURS=24
 PUBLIC_KEY_TRAFFIC_GB=500
+PUBLIC_KEY_POST_HOUR_MSK=14
 PUBLIC_KEY_CHAT_ID=
 NODE_STATUS_POLL_INTERVAL_SECONDS=60
 EXPIRED_SUBSCRIPTION_CLEANUP_ENABLED=true
