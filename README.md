@@ -223,7 +223,7 @@ Then set:
 ADMIN_REALITY_INBOUND_ID=2
 ADMIN_REALITY_PUBLIC_HOST=admin-server-ip
 ADMIN_REALITY_PUBLIC_PORT=443
-ADMIN_REALITY_VLESS_QUERY=type=tcp&security=reality&encryption=none&fp=chrome&sni=example.com&pbk=PUBLIC_KEY&sid=SHORT_ID&spx=%2F
+ADMIN_REALITY_VLESS_QUERY=type=tcp&security=reality&encryption=none&fp=chrome&sni=www.bosch.com&pbk=PUBLIC_KEY&sid=SHORT_ID&spx=%2F
 ```
 
 Use `/admin_reality_key` or the `Создать Reality test key` button in `/admin` to issue test keys. `/admin_key` stays on the regular admin VLESS inbound. User, trial and public 24h keys are still issued from active non-reserved nodes, so the France user node stays on `type=tcp&security=none`.
