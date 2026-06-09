@@ -4,7 +4,7 @@ from decimal import Decimal
 import json
 import time
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote
 from uuid import uuid4
 
 import httpx
@@ -74,21 +74,36 @@ class X3UIClient:
 
         expiry_ms = int(expires_at.timestamp() * 1000) if expires_at else 0
         total_gb = int(Decimal(traffic_gb or 0) * Decimal(1024**3))
+        flow = self._vless_flow()
+        client_settings = {
+            "id": client_uuid,
+            "email": email,
+            "enable": True,
+            "expiryTime": expiry_ms,
+            "totalGB": total_gb,
+            "tgId": str(telegram_id or ""),
+            "limitIp": CLIENT_IP_LIMIT,
+            "subId": client_uuid.replace("-", "")[:16],
+        }
+        api_client = {
+            "email": email,
+            "id": client_uuid,
+            "uuid": client_uuid,
+            "subId": client_uuid.replace("-", "")[:16],
+            "totalGB": total_gb,
+            "expiryTime": expiry_ms,
+            "tgId": telegram_id or 0,
+            "limitIp": CLIENT_IP_LIMIT,
+            "enable": True,
+        }
+        if flow:
+            client_settings["flow"] = flow
+            api_client["flow"] = flow
+
         legacy_payload = {
             "id": self.target.inbound_id,
             "settings": json.dumps({
-                "clients": [
-                    {
-                        "id": client_uuid,
-                        "email": email,
-                        "enable": True,
-                        "expiryTime": expiry_ms,
-                        "totalGB": total_gb,
-                        "tgId": str(telegram_id or ""),
-                        "limitIp": CLIENT_IP_LIMIT,
-                        "subId": client_uuid.replace("-", "")[:16],
-                    }
-                ]
+                "clients": [client_settings]
             }),
         }
 
@@ -97,17 +112,7 @@ class X3UIClient:
             response = await client.post(
                 "/panel/api/clients/add",
                 json={
-                    "client": {
-                        "email": email,
-                        "id": client_uuid,
-                        "uuid": client_uuid,
-                        "subId": client_uuid.replace("-", "")[:16],
-                        "totalGB": total_gb,
-                        "expiryTime": expiry_ms,
-                        "tgId": telegram_id or 0,
-                        "limitIp": CLIENT_IP_LIMIT,
-                        "enable": True,
-                    },
+                    "client": api_client,
                     "inboundIds": [self.target.inbound_id],
                 },
             )
@@ -186,6 +191,13 @@ class X3UIClient:
             f"vless://{client_uuid}@{self.target.public_host}:{self.target.public_port}"
             f"?{self.target.vless_query}#{safe_label}"
         )
+
+    def _vless_flow(self) -> str | None:
+        query = self.target.vless_query.lstrip("?")
+        for key, value in parse_qsl(query, keep_blank_values=False):
+            if key == "flow" and value:
+                return value
+        return None
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(base_url=self.target.base_url, timeout=20.0, follow_redirects=True)

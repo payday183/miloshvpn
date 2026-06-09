@@ -298,6 +298,14 @@ def admin_key_text(key: VpnKey) -> str:
     )
 
 
+def admin_reality_key_text(key: VpnKey) -> str:
+    return (
+        "Админский Reality test key создан без оплаты.\n\n"
+        f"Label: <code>{escape(key.email)}</code>\n"
+        f"VLESS TCP Reality ключ:\n<code>{escape(key.vless_uri)}</code>"
+    )
+
+
 def admin_order_search_prompt_text() -> str:
     return (
         "🔎 Найти оплату\n\n"
@@ -403,10 +411,12 @@ def admin_help_text() -> str:
         "• выбрать систему оплаты для новых заказов;\n"
         "• увидеть личные ключи и удалить лишний;\n"
         "• создать admin key без оплаты;\n"
+        "• создать admin Reality test key;\n"
         "• управлять бесплатным публичным ключом.\n\n"
         "<code>/add_admin TELEGRAM_ID</code> — добавить админа.\n"
         "<code>/find_order КОД_ИЛИ_ID</code> — найти оплату.\n"
-        "<code>/admin_key</code> — создать admin key."
+        "<code>/admin_key</code> — создать admin key.\n"
+        "<code>/admin_reality_key</code> — создать admin Reality test key."
     )
 
 

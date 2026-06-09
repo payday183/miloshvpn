@@ -161,6 +161,44 @@ async def activate_node(session: AsyncSession, node_id: int) -> VpnNode:
     return node
 
 
+async def update_node(
+    session: AsyncSession,
+    node_id: int,
+    *,
+    title: str,
+    mode: str,
+    base_url: str,
+    username: str,
+    password: str | None,
+    inbound_id: int,
+    max_clients: int,
+    public_host: str,
+    public_port: int,
+    vless_query: str,
+    activate: bool,
+) -> VpnNode:
+    node = await session.get(VpnNode, node_id)
+    if node is None:
+        raise ValueError("Node not found")
+
+    node.title = title.strip()
+    node.mode = mode
+    node.base_url = base_url.strip().rstrip("/")
+    node.username = username.strip()
+    if password:
+        node.password = password
+    node.inbound_id = inbound_id
+    node.max_clients = max_clients
+    node.public_host = public_host.strip()
+    node.public_port = public_port
+    node.vless_query = vless_query.strip()
+    node.is_active = activate
+    node.updated_at = utcnow()
+    await session.commit()
+    await session.refresh(node)
+    return node
+
+
 async def disable_node(session: AsyncSession, node_id: int) -> VpnNode:
     node = await session.get(VpnNode, node_id)
     if node is None:

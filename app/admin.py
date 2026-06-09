@@ -16,12 +16,12 @@ from app.services.admin_auth import (
     verify_admin_profile_signature,
     verify_telegram_login,
 )
-from app.services.admin_keys import create_admin_key
+from app.services.admin_keys import create_admin_key, create_admin_reality_key
 from app.services.billing import poll_donations
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
 from app.services.manual_orders import ManualOrderError, ManualOrderGrantResult, manually_confirm_order, search_orders_for_admin
 from app.services.node_monitor import format_bytes, local_key_counts, refresh_all_nodes, refresh_node_status
-from app.services.nodes import activate_node, create_node, disable_node, list_nodes
+from app.services.nodes import activate_node, create_node, disable_node, list_nodes, update_node
 from app.services.payment_notifications import notify_paid_order
 from app.services.payment_modes import (
     get_active_payment_provider,
@@ -130,6 +130,35 @@ async def activate_node_action(
     _: None = Depends(require_admin_token),
 ) -> RedirectResponse:
     await activate_node(session, node_id)
+    return redirect_to_admin(request)
+
+
+@router.post("/admin/nodes/{node_id}/update")
+async def update_node_action(
+    node_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> RedirectResponse:
+    form = await request.form()
+    try:
+        await update_node(
+            session,
+            node_id,
+            title=str(form.get("title") or "VPN node"),
+            mode=str(form.get("mode") or "mock"),
+            base_url=str(form.get("base_url") or "http://x3ui:2053"),
+            username=str(form.get("username") or "admin"),
+            password=str(form.get("password") or "").strip() or None,
+            inbound_id=int(str(form.get("inbound_id") or "1")),
+            max_clients=int(str(form.get("max_clients") or "10")),
+            public_host=str(form.get("public_host") or "127.0.0.1"),
+            public_port=int(str(form.get("public_port") or "8443")),
+            vless_query=str(form.get("vless_query") or "type=tcp&security=none"),
+            activate=str(form.get("activate") or "") == "on",
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Node not found")
     return redirect_to_admin(request)
 
 
@@ -257,6 +286,25 @@ async def create_admin_key_action(
     await session.commit()
     await session.refresh(key)
     return HTMLResponse(render_admin_key_page(key, telegram_id, request.query_params.get("token", "")))
+
+
+@router.post("/admin/admin-reality-keys")
+async def create_admin_reality_key_action(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> HTMLResponse:
+    form = await request.form()
+    telegram_id_raw = str(form.get("telegram_id") or "").strip()
+    if not telegram_id_raw.isdigit():
+        raise HTTPException(status_code=400, detail="Telegram ID is required")
+
+    telegram_id = int(telegram_id_raw)
+    user = await get_or_create_admin_user(session, telegram_id)
+    key = await create_admin_reality_key(session, user)
+    await session.commit()
+    await session.refresh(key)
+    return HTMLResponse(render_admin_key_page(key, telegram_id, request.query_params.get("token", ""), reality=True))
 
 
 @router.post("/admin/keys/{key_id}/revoke")
@@ -746,6 +794,23 @@ def render_admin_page(
         align-items: center;
         flex-wrap: wrap;
       }}
+      details.node-edit {{
+        width: min(520px, 80vw);
+      }}
+      details.node-edit summary {{
+        cursor: pointer;
+        color: #1563ff;
+        font-size: 13px;
+        margin-bottom: 8px;
+      }}
+      form.node-edit-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+        gap: 8px;
+      }}
+      form.node-edit-grid label.wide {{
+        grid-column: 1 / -1;
+      }}
       .badge {{
         display: inline-block;
         border-radius: 999px;
@@ -795,6 +860,10 @@ def render_admin_page(
         <form method="post" action="/admin/admin-keys{token_qs}" class="grid">
           <label>Telegram ID админа<input name="telegram_id" value="{escape(default_admin_id)}" inputmode="numeric"></label>
           <div class="actions"><button type="submit">Создать admin key</button></div>
+        </form>
+        <form method="post" action="/admin/admin-reality-keys{token_qs}" class="grid" style="margin-top: 12px;">
+          <label>Telegram ID админа<input name="telegram_id" value="{escape(default_admin_id)}" inputmode="numeric"></label>
+          <div class="actions"><button class="secondary" type="submit">Создать Reality test key</button></div>
         </form>
         <p class="muted" style="margin-top: 10px;">Ключ создаётся без оплаты и привязывается к Telegram ID админа.</p>
       </section>
@@ -917,8 +986,10 @@ def render_admin_page(
 </html>"""
 
 
-def render_admin_key_page(key: VpnKey, telegram_id: int, token: str) -> str:
+def render_admin_key_page(key: VpnKey, telegram_id: int, token: str, *, reality: bool = False) -> str:
     token_qs = f"?{urlencode({'token': token})}" if token else ""
+    heading = "Админский Reality test key создан" if reality else "Админский ключ создан"
+    key_label = "VLESS TCP Reality ключ" if reality else "VLESS ключ"
     return f"""<!doctype html>
 <html lang="ru">
   <head>
@@ -931,12 +1002,12 @@ def render_admin_key_page(key: VpnKey, telegram_id: int, token: str) -> str:
     <main class="profile-shell">
       <section class="profile-panel">
         <p class="eyebrow">MiloshVPN</p>
-        <h1>Админский ключ создан</h1>
+        <h1>{heading}</h1>
         <dl>
           <div><dt>Telegram ID</dt><dd><code>{telegram_id}</code></dd></div>
           <div><dt>Label</dt><dd><code>{escape(key.email)}</code></dd></div>
         </dl>
-        <p class="muted">VLESS ключ</p>
+        <p class="muted">{key_label}</p>
         <code>{escape(key.vless_uri)}</code>
         <div class="actions" style="margin-top: 18px;">
           <a class="button" href="/admin{token_qs}">Вернуться в админку</a>
@@ -1263,6 +1334,33 @@ def render_node_row(node: VpnNode, counts: dict[str, int], token_qs: str) -> str
         else f'<form method="post" action="/admin/nodes/{node.id}/activate{token_qs}">'
         '<button type="submit">В пул пользователей</button></form>'
     )
+    mock_selected = " selected" if node.mode == "mock" else ""
+    live_selected = " selected" if node.mode == "live" else ""
+    activate_checked = " checked" if node.is_active else ""
+    edit_form = f"""
+        <details class="node-edit">
+          <summary>Настроить</summary>
+          <form method="post" action="/admin/nodes/{node.id}/update{token_qs}" class="node-edit-grid">
+            <label>Название<input name="title" value="{escape(node.title)}"></label>
+            <label>Режим
+              <select name="mode">
+                <option value="mock"{mock_selected}>mock</option>
+                <option value="live"{live_selected}>live</option>
+              </select>
+            </label>
+            <label class="wide">3x-ui URL<input name="base_url" value="{escape(node.base_url)}"></label>
+            <label>Логин<input name="username" value="{escape(node.username)}"></label>
+            <label>Новый пароль<input name="password" type="password" placeholder="не менять"></label>
+            <label>Inbound ID<input name="inbound_id" value="{node.inbound_id}" type="number"></label>
+            <label>Max clients<input name="max_clients" value="{node.max_clients}" type="number"></label>
+            <label>Public host<input name="public_host" value="{escape(node.public_host)}"></label>
+            <label>Public port<input name="public_port" value="{node.public_port}" type="number"></label>
+            <label class="wide">VLESS query<input name="vless_query" value="{escape(node.vless_query)}"></label>
+            <label class="wide"><input name="activate" type="checkbox"{activate_checked}> Использовать для пользователей</label>
+            <div class="actions"><button class="secondary" type="submit">Сохранить</button></div>
+          </form>
+        </details>
+    """
     return f"""<tr>
       <td>{node.id}</td>
       <td>{escape(node.title)}<br><span class="badge">{escape(node.mode)}</span> {active}</td>
@@ -1281,7 +1379,7 @@ def render_node_row(node: VpnNode, counts: dict[str, int], token_qs: str) -> str
         down: {format_bytes(node.traffic_down_bytes)}
       </td>
       <td>{load}</td>
-      <td><div class="actions">{action}<form method="post" action="/admin/nodes/{node.id}/refresh{token_qs}"><button class="secondary" type="submit">Статус</button></form></div></td>
+      <td><div class="actions">{action}<form method="post" action="/admin/nodes/{node.id}/refresh{token_qs}"><button class="secondary" type="submit">Статус</button></form>{edit_form}</div></td>
     </tr>"""
 
 

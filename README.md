@@ -190,6 +190,45 @@ The test limit is controlled by:
 X3UI_MAX_CLIENTS=10
 ```
 
+### Admin-only VLESS TCP Reality test
+
+Keep the public user node on the normal France inbound while testing Reality on the local admin 3x-ui container.
+
+The local admin 3x-ui container exposes a dedicated Reality port while keeping the regular admin VLESS port on `8443`:
+
+```env
+X3UI_ADMIN_REALITY_PORT=443
+```
+
+In the local 3x-ui panel, create a separate inbound:
+
+```text
+Protocol: VLESS
+Transport: TCP
+Security: Reality
+Port: 443
+Flow: xtls-rprx-vision, if the inbound uses Vision
+```
+
+Keep the reserved admin node as the real admin server. Configure the Reality test inbound separately:
+
+```text
+node id: 1
+regular VLESS inbound: 1 / port 8443
+Reality test inbound: 2 / port 443
+```
+
+Then set:
+
+```env
+ADMIN_REALITY_INBOUND_ID=2
+ADMIN_REALITY_PUBLIC_HOST=admin-server-ip
+ADMIN_REALITY_PUBLIC_PORT=443
+ADMIN_REALITY_VLESS_QUERY=type=tcp&security=reality&encryption=none&flow=xtls-rprx-vision&fp=chrome&sni=example.com&pbk=PUBLIC_KEY&sid=SHORT_ID&spx=%2F
+```
+
+Use `/admin_reality_key` or the `Создать Reality test key` button in `/admin` to issue test keys. `/admin_key` stays on the regular admin VLESS inbound. User, trial and public 24h keys are still issued from active non-reserved nodes, so the France user node stays on `type=tcp&security=none`.
+
 ## Public Free Key
 
 The worker rotates the public key every 24 hours.

@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     vless_public_host: str = "127.0.0.1"
     vless_public_port: int = 8443
     vless_query: str = "type=tcp&security=none"
+    admin_reality_inbound_id: int = 2
+    admin_reality_public_host: str = ""
+    admin_reality_public_port: int = 443
+    admin_reality_vless_query: str = ""
 
     public_key_enabled: bool = True
     public_key_rotate_hours: int = 24
