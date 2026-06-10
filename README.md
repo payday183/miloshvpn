@@ -223,12 +223,28 @@ Then set:
 ADMIN_REALITY_INBOUND_ID=2
 ADMIN_REALITY_PUBLIC_HOST=admin-server-ip
 ADMIN_REALITY_PUBLIC_PORT=443
-ADMIN_REALITY_VLESS_QUERY=type=tcp&security=reality&encryption=none&fp=chrome&sni=www.debian.org&pbk=PUBLIC_KEY&sid=SHORT_ID&spx=%2F
+ADMIN_REALITY_VLESS_QUERY=type=tcp&security=reality&encryption=none&fp=chrome&sni=www.wikipedia.org&pbk=PUBLIC_KEY&sid=SHORT_ID&spx=%2F
 ```
 
 Use `/admin_reality_key` or the `Создать Reality test key` button in `/admin` to issue test keys. `/admin_key` stays on the regular admin VLESS inbound. User, trial and public 24h keys are still issued from active non-reserved nodes, so the France user node stays on `type=tcp&security=none`.
 
 For a later Vision test, add `flow=xtls-rprx-vision` to `ADMIN_REALITY_VLESS_QUERY`; the backend will pass that flow to 3x-ui client settings.
+
+Reality domains are candidates until they are verified from the same server that runs Xray. For the bundled admin `x3ui` container, build a verified domain pool with:
+
+```sh
+python3 scripts/reality_domain_pool.py --sources tranco,majestic,cloudflare,cisco,fallback --source-limit 1000 --max-check 100
+```
+
+The script checks candidates from the `x3ui` container via `docker compose exec -T x3ui`, then writes:
+
+```text
+var/reality-domains/verified.txt
+var/reality-domains/bad.txt
+var/reality-domains/active.json
+```
+
+Only use the `active.json` domain for the local admin Reality inbound and `ADMIN_REALITY_VLESS_QUERY`. Do not create extra VPN nodes for Reality protocol variants; nodes represent real VPN servers.
 
 ## Public Free Key
 
