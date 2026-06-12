@@ -16,6 +16,7 @@ from app.services.admin_auth import (
     verify_admin_profile_signature,
     verify_telegram_login,
 )
+from app.services.admin_key_notifications import send_admin_reality_key
 from app.services.admin_keys import create_admin_key, create_admin_reality_key
 from app.services.billing import poll_donations
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
@@ -109,7 +110,7 @@ async def create_node_action(
         session,
         title=str(form.get("title") or "New node"),
         mode=str(form.get("mode") or "mock"),
-        base_url=str(form.get("base_url") or "http://x3ui:2053"),
+        base_url=str(form.get("base_url") or "https://x3ui:2053"),
         username=str(form.get("username") or "admin"),
         password=str(form.get("password") or "admin"),
         inbound_id=int(str(form.get("inbound_id") or "1")),
@@ -147,7 +148,7 @@ async def update_node_action(
             node_id,
             title=str(form.get("title") or "VPN node"),
             mode=str(form.get("mode") or "mock"),
-            base_url=str(form.get("base_url") or "http://x3ui:2053"),
+            base_url=str(form.get("base_url") or "https://x3ui:2053"),
             username=str(form.get("username") or "admin"),
             password=str(form.get("password") or "").strip() or None,
             inbound_id=int(str(form.get("inbound_id") or "1")),
@@ -304,6 +305,7 @@ async def create_admin_reality_key_action(
     key = await create_admin_reality_key(session, user)
     await session.commit()
     await session.refresh(key)
+    await notify_admin_reality_key_from_web(telegram_id, key)
     return HTMLResponse(render_admin_key_page(key, telegram_id, request.query_params.get("token", ""), reality=True))
 
 
@@ -338,6 +340,18 @@ async def notify_order_from_web(order_id: int) -> bool:
     bot = Bot(settings.bot_token)
     try:
         return await notify_paid_order(bot, order_id, force=True)
+    finally:
+        await bot.session.close()
+
+
+async def notify_admin_reality_key_from_web(telegram_id: int, key: VpnKey) -> bool:
+    settings = get_settings()
+    if not settings.bot_token:
+        return False
+
+    bot = Bot(settings.bot_token)
+    try:
+        return await send_admin_reality_key(bot, telegram_id, key)
     finally:
         await bot.session.close()
 
@@ -911,7 +925,7 @@ def render_admin_page(
               <option value="live">live</option>
             </select>
           </label>
-          <label>3x-ui URL<input name="base_url" value="http://x3ui:2053"></label>
+          <label>3x-ui URL<input name="base_url" value="https://x3ui:2053"></label>
           <label>Логин<input name="username" value="admin"></label>
           <label>Пароль<input name="password" value="admin" type="password"></label>
           <label>Inbound ID<input name="inbound_id" value="1" type="number"></label>

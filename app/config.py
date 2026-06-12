@@ -31,7 +31,8 @@ class Settings(BaseSettings):
     payment_amount_tolerance_rub: Decimal = Decimal("2.00")
 
     x3ui_mode: Literal["mock", "live"] = "mock"
-    x3ui_base_url: str = "http://x3ui:2053"
+    x3ui_base_url: str = "https://x3ui:2053"
+    x3ui_tls_verify: bool = False
     x3ui_username: str = "admin"
     x3ui_password: str = "admin"
     x3ui_inbound_id: int = 1
@@ -46,6 +47,7 @@ class Settings(BaseSettings):
     admin_reality_inbound_id: int = 2
     admin_reality_public_host: str = ""
     admin_reality_public_port: int = 443
+    admin_reality_public_key: str = ""
     admin_reality_vless_query: str = ""
 
     public_key_enabled: bool = True

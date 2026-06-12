@@ -14,7 +14,8 @@ from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.models import Order, Plan
 from app.services.admin_auth import build_admin_profile_url
-from app.services.admin_keys import create_admin_key, create_admin_reality_key
+from app.services.admin_key_notifications import send_admin_reality_key
+from app.services.admin_keys import create_admin_key, create_admin_reality_keys_for_admins
 from app.services.billing import create_order, poll_donations
 from app.services.manual_orders import ManualOrderError, manually_confirm_order, search_orders_for_admin
 from app.services.payment_modes import (
@@ -56,7 +57,6 @@ from app.tg import keyboards as kb
 from app.tg.texts import (
     admin_help_text,
     admin_key_text,
-    admin_reality_key_text,
     admin_manual_grant_result_text,
     admin_qr_request_text,
     admin_order_result_text,
@@ -789,17 +789,26 @@ async def create_admin_reality_key_command(message: Message) -> None:
         return
 
     async with SessionLocal() as session:
-        user = await get_or_create_user(
-            session,
-            telegram_id=message.from_user.id,
-            username=message.from_user.username,
-            first_name=message.from_user.first_name,
-        )
-        key = await create_admin_reality_key(session, user)
+        created = await create_admin_reality_keys_for_admins(session)
         await session.commit()
-        await session.refresh(key)
 
-    await message.answer(admin_reality_key_text(key), parse_mode=ParseMode.HTML, reply_markup=kb.admin_keyboard())
+    sent = 0
+    failed: list[int] = []
+    for telegram_id, key in created:
+        if await send_admin_reality_key(message.bot, telegram_id, key):
+            sent += 1
+        else:
+            failed.append(telegram_id)
+
+    failed_text = ""
+    if failed:
+        failed_text = "\nНе отправилось: " + ", ".join(f"<code>{telegram_id}</code>" for telegram_id in failed)
+    await message.answer(
+        f"Создал Reality test keys для админов: <b>{len(created)}</b>\n"
+        f"Отправлено в личку: <b>{sent}</b>{failed_text}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb.admin_keyboard(),
+    )
 
 
 @router.callback_query(F.data.startswith("admin_qr_upload:"))

@@ -223,12 +223,13 @@ Then set:
 ADMIN_REALITY_INBOUND_ID=2
 ADMIN_REALITY_PUBLIC_HOST=admin-server-ip
 ADMIN_REALITY_PUBLIC_PORT=443
-ADMIN_REALITY_VLESS_QUERY=type=tcp&security=reality&encryption=none&fp=chrome&sni=www.wikipedia.org&pbk=PUBLIC_KEY&sid=SHORT_ID&spx=%2F
+ADMIN_REALITY_PUBLIC_KEY=PUBLIC_KEY
+ADMIN_REALITY_VLESS_QUERY=
 ```
 
-Use `/admin_reality_key` or the `Создать Reality test key` button in `/admin` to issue test keys. `/admin_key` stays on the regular admin VLESS inbound. User, trial and public 24h keys are still issued from active non-reserved nodes, so the France user node stays on `type=tcp&security=none`.
+Use `/admin_reality_key` or the `Создать Reality test key` button in `/admin` to issue test keys. The backend adds the client through the configured 3x-ui inbound, rereads that inbound, confirms the client UUID is present, and builds the VLESS Reality link from the current `streamSettings` values (`network`, `security`, `serverNames`, `shortIds`, `publicKey`, fingerprint, spiderX). `ADMIN_REALITY_PUBLIC_KEY` is only a fallback and consistency check; when the current inbound privateKey can be read, its computed public key wins, and a mismatching env value aborts key issuing. Keep `ADMIN_REALITY_VLESS_QUERY` empty for the admin Reality inbound. Admin Reality clients are issued with the standard `flow=xtls-rprx-vision`, and the backend refuses to send links with an empty `pbk`, unexpected `flow`, wrong SNI, wrong shortId, wrong host, or wrong port.
 
-For a later Vision test, add `flow=xtls-rprx-vision` to `ADMIN_REALITY_VLESS_QUERY`; the backend will pass that flow to 3x-ui client settings.
+`/admin_key` stays on the regular admin VLESS inbound. User, trial and public 24h keys are still issued from active non-reserved nodes, so the France user node stays on `type=tcp&security=none`.
 
 Reality domains are candidates until they are verified from the same server that runs Xray. For the bundled admin `x3ui` container, build a verified domain pool with:
 
