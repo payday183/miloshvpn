@@ -1,26 +1,16 @@
 from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.models import Subscription, User, VpnKey
-from app.services.nodes import select_node_for_key
+from app.services.system_x3ui import select_inbounds_for_client
 from app.services.x3ui import X3UIClient
 from app.timeutils import utcnow
 
 TRIAL_PLAN_CODE = "trial"
-
-
-async def active_private_key_count(session: AsyncSession, node_id: int | None = None) -> int:
-    query = select(func.count()).select_from(VpnKey).where(
-        VpnKey.key_type == "private",
-        VpnKey.active.is_(True),
-    )
-    if node_id is not None:
-        query = query.where(VpnKey.node_id == node_id)
-    return int(await session.scalar(query) or 0)
 
 
 async def get_active_subscription(session: AsyncSession, user_id: int) -> Subscription | None:
@@ -54,7 +44,6 @@ async def revoke_user_private_keys(session: AsyncSession, user_id: int) -> None:
     keys = (
         await session.scalars(
             select(VpnKey)
-            .options(selectinload(VpnKey.node))
             .where(
                 VpnKey.user_id == user_id,
                 VpnKey.key_type == "private",
@@ -64,7 +53,7 @@ async def revoke_user_private_keys(session: AsyncSession, user_id: int) -> None:
     ).all()
     now = utcnow()
     for key in keys:
-        x3ui = X3UIClient(node=key.node)
+        x3ui = X3UIClient()
         await x3ui.revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
         key.active = False
         key.revoked_at = now
@@ -78,7 +67,6 @@ async def list_active_private_keys(session: AsyncSession, limit: int = 30) -> li
                 .options(
                     selectinload(VpnKey.user),
                     selectinload(VpnKey.subscription),
-                    selectinload(VpnKey.node),
                 )
                 .where(VpnKey.key_type == "private", VpnKey.active.is_(True))
                 .order_by(VpnKey.created_at.desc())
@@ -91,14 +79,13 @@ async def list_active_private_keys(session: AsyncSession, limit: int = 30) -> li
 async def revoke_private_key(session: AsyncSession, key_id: int) -> VpnKey | None:
     key = await session.scalar(
         select(VpnKey)
-        .options(selectinload(VpnKey.node))
         .where(VpnKey.id == key_id, VpnKey.key_type == "private", VpnKey.active.is_(True))
         .with_for_update()
     )
     if key is None:
         return None
 
-    x3ui = X3UIClient(node=key.node)
+    x3ui = X3UIClient()
     await x3ui.revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
     key.active = False
     key.revoked_at = utcnow()
@@ -107,27 +94,20 @@ async def revoke_private_key(session: AsyncSession, key_id: int) -> VpnKey | Non
 
 async def create_private_key(session: AsyncSession, user: User, subscription: Subscription) -> VpnKey:
     settings = get_settings()
-    node = await select_node_for_key(session)
-    if node is None and settings.x3ui_mode != "mock":
-        raise RuntimeError("No available VPN node for private key")
-
-    node_id = node.id if node is not None else None
-    max_clients = node.max_clients if node is not None else settings.x3ui_max_clients
-    existing_key = await get_active_key(session, user.id)
-    if existing_key is None and await active_private_key_count(session, node_id) >= max_clients:
-        raise RuntimeError(f"Test 3x-ui limit reached: {max_clients} active private keys")
+    selection = await select_inbounds_for_client("user")
 
     await revoke_user_private_keys(session, user.id)
 
     label = f"milosh_{user.telegram_id}"
-    client = await X3UIClient(settings, node=node).create_client(
+    client = await X3UIClient(settings).create_subscription_client(
         email=label,
         telegram_id=user.telegram_id,
         expires_at=subscription.expires_at,
         traffic_gb=subscription.traffic_limit_gb,
+        inbound_ids=selection.inbound_ids,
     )
     key = VpnKey(
-        node_id=node_id,
+        node_id=None,
         user_id=user.id,
         subscription_id=subscription.id,
         key_type="private",
@@ -141,6 +121,13 @@ async def create_private_key(session: AsyncSession, user: User, subscription: Su
     session.add(key)
     await session.flush()
     return key
+
+
+async def replace_active_private_key(session: AsyncSession, user: User) -> VpnKey:
+    subscription = await get_active_subscription(session, user.id)
+    if subscription is None:
+        raise RuntimeError("No active subscription for key replacement")
+    return await create_private_key(session, user, subscription)
 
 
 async def ensure_trial_subscription(session: AsyncSession, user: User) -> tuple[Subscription | None, VpnKey | None, bool]:

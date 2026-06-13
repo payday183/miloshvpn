@@ -20,7 +20,9 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-milosh}:${POSTGRES_PASSWORD:-milosh_password}@postgres:5432/${POSTGRES_DB:-miloshvpn}
       REDIS_URL: redis://redis:6379/0
-      X3UI_BASE_URL: https://x3ui:2053
+      X3UI_BASE_URL: ${X3UI_BASE_URL:-https://host.docker.internal:24475}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,7 +69,9 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-milosh}:${POSTGRES_PASSWORD:-milosh_password}@postgres:5432/${POSTGRES_DB:-miloshvpn}
       REDIS_URL: redis://redis:6379/0
-      X3UI_BASE_URL: https://x3ui:2053
+      X3UI_BASE_URL: ${X3UI_BASE_URL:-https://host.docker.internal:24475}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       api:
         condition: service_healthy
@@ -85,11 +89,11 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-milosh}:${POSTGRES_PASSWORD:-milosh_password}@postgres:5432/${POSTGRES_DB:-miloshvpn}
       REDIS_URL: redis://redis:6379/0
-      X3UI_BASE_URL: https://x3ui:2053
+      X3UI_BASE_URL: ${X3UI_BASE_URL:-https://host.docker.internal:24475}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       api:
-        condition: service_healthy
-      x3ui:
         condition: service_healthy
 
   redis:
@@ -126,48 +130,6 @@ services:
       timeout: 5s
       retries: 5
 
-  x3ui:
-    build:
-      context: ./vendor/3x-ui
-    image: miloshvpn-x3ui:local-v3.3.0
-    entrypoint:
-      - /bin/sh
-      - -c
-      - mkdir -p /var/log/xray && touch /var/log/xray/access.log && exec /app/DockerEntrypoint.sh
-    restart: unless-stopped
-    mem_limit: 512m
-    memswap_limit: 768m
-    pids_limit: 128
-    logging: *default-logging
-    tty: true
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    environment:
-      XRAY_VMESS_AEAD_FORCED: "false"
-      XUI_ENABLE_FAIL2BAN: "true"
-    volumes:
-      - x3ui-db:/etc/x-ui/
-      - x3ui-cert:/root/cert/
-      - x3ui-logs:/var/log/xray/
-    ports:
-      - "${X3UI_PANEL_PORT:-2053}:2053"
-      - "${X3UI_VLESS_PORT:-8443}:8443"
-      - "${X3UI_ADMIN_REALITY_PORT:-443}:443"
-    healthcheck:
-      test: ["CMD-SHELL", "wget --no-check-certificate -q --spider https://127.0.0.1:2053/csrf-token || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-
 volumes:
   postgres-data:
   redis-data:
-  x3ui-db:
-  x3ui-cert:
-  x3ui-logs:

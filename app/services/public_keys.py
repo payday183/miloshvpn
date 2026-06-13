@@ -6,17 +6,17 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.models import PublicKeyPostTemplate, Setting, VpnKey
-from app.services.nodes import get_active_node, select_node_for_key
+from app.services.system_x3ui import select_inbounds_for_client
 from app.services.x3ui import X3UIClient
 from app.timeutils import utcnow
 
 PUBLIC_KEY_LAST_POSTED_AT = "public_key_last_posted_at"
 PUBLIC_KEY_TEMPLATE_INDEX = "public_key_template_index"
 PUBLIC_KEY_LIFETIME_HOURS = 24
+PUBLIC_KEY_POST_INTERVAL_HOURS = 48
 PUBLIC_KEY_TRAFFIC_GB = 500
 PUBLIC_KEY_TIMEZONE = ZoneInfo("Europe/Moscow")
 
@@ -39,33 +39,31 @@ async def rotate_public_key(session: AsyncSession) -> VpnKey:
     now = utcnow()
     lifetime_hours = _public_key_lifetime_hours(settings)
     traffic_gb = _public_key_traffic_gb(settings)
-    node = await select_node_for_key(session) or await get_active_node(session)
-    if node is None and settings.x3ui_mode != "mock":
-        raise RuntimeError("No available VPN node for public key")
+    selection = await select_inbounds_for_client("public")
 
     keys = (
         await session.scalars(
             select(VpnKey)
-            .options(selectinload(VpnKey.node))
             .where(VpnKey.key_type == "public", VpnKey.active.is_(True))
         )
     ).all()
     for key in keys:
-        x3ui = X3UIClient(settings, node=key.node)
+        x3ui = X3UIClient(settings)
         await x3ui.revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
         key.active = False
         key.revoked_at = now
 
     expires_at = now + timedelta(hours=lifetime_hours)
-    x3ui = X3UIClient(settings, node=node)
-    client = await x3ui.create_client(
+    x3ui = X3UIClient(settings)
+    client = await x3ui.create_subscription_client(
         email=f"milosh_free_{now:%Y%m%d_%H%M}",
         telegram_id=None,
         expires_at=expires_at,
         traffic_gb=traffic_gb,
+        inbound_ids=selection.inbound_ids,
     )
     key = VpnKey(
-        node_id=node.id if node else None,
+        node_id=None,
         user_id=None,
         subscription_id=None,
         key_type="public",
@@ -89,16 +87,25 @@ async def seconds_until_next_public_key_post(session: AsyncSession, now: datetim
 
     now = now or utcnow()
     active_key = await get_active_public_key(session)
-    if active_key is None:
-        return 0
-
     last_posted_at = await get_public_key_last_posted_at(session)
+
+    if active_key is None:
+        if last_posted_at is None:
+            return 0
+        next_post_at = _next_public_key_post_at(
+            last_posted_at=last_posted_at,
+            post_hour_msk=settings.public_key_post_hour_msk,
+            interval_hours=_public_key_post_interval_hours(settings),
+        )
+        return max(0, ceil((next_post_at - now).total_seconds()))
+
     if last_posted_at is None:
         next_post_at = _scheduled_public_key_post_at(now, settings.public_key_post_hour_msk)
     else:
         next_post_at = _next_public_key_post_at(
             last_posted_at=last_posted_at,
             post_hour_msk=settings.public_key_post_hour_msk,
+            interval_hours=_public_key_post_interval_hours(settings),
         )
 
     return max(0, ceil((next_post_at - now).total_seconds()))
@@ -109,7 +116,6 @@ async def expire_public_keys(session: AsyncSession, *, limit: int = 100) -> dict
     keys = (
         await session.scalars(
             select(VpnKey)
-            .options(selectinload(VpnKey.node))
             .where(
                 VpnKey.key_type == "public",
                 VpnKey.active.is_(True),
@@ -124,7 +130,7 @@ async def expire_public_keys(session: AsyncSession, *, limit: int = 100) -> dict
     failed_revokes = 0
     for key in keys:
         try:
-            await X3UIClient(node=key.node).revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+            await X3UIClient().revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
         except Exception:
             failed_revokes += 1
             continue
@@ -218,15 +224,22 @@ async def set_setting_value(session: AsyncSession, key: str, value: str) -> None
 def public_key_post_text(key: VpnKey, template_body: str | None = None) -> str:
     settings = get_settings()
     lifetime_hours = _public_key_lifetime_hours(settings)
+    post_interval_hours = _public_key_post_interval_hours(settings)
     traffic_gb = _public_key_traffic_gb(settings)
     expires = (
         key.expires_at.astimezone(PUBLIC_KEY_TIMEZONE).strftime("%d.%m %H:%M MSK")
         if key.expires_at
         else f"через {lifetime_hours} часа"
     )
+    next_free_key_at = _next_public_key_post_at(
+        last_posted_at=key.created_at,
+        post_hour_msk=settings.public_key_post_hour_msk,
+        interval_hours=post_interval_hours,
+    ).astimezone(PUBLIC_KEY_TIMEZONE).strftime("%d.%m %H:%M MSK")
     vless_uri = escape(key.vless_uri)
     context = {
         "expires": expires,
+        "next_free_key_at": next_free_key_at,
         "hours": str(lifetime_hours),
         "traffic_gb": str(traffic_gb),
         "key": vless_uri,
@@ -240,16 +253,24 @@ def public_key_post_text(key: VpnKey, template_body: str | None = None) -> str:
 
     return (
         "Бесплатный ключ MiloshVPN уже на столе.\n\n"
-        "Забирай VLESS, проверяй скорость и не рассказывай интернету, что он был медленным.\n\n"
+        "Забирай sub-ссылку, проверяй скорость и не рассказывай интернету, что он был медленным.\n\n"
         f"{context['key_block']}\n\n"
         f"Живет до: {expires}\n"
         f"Лимит: {context['traffic_gb']} ГБ\n"
-        f"Через {context['hours']} ч ключ будет заменен автоматически."
+        f"Следующий бесплатный sub: {context['next_free_key_at']}."
     )
 
 
 def _public_key_lifetime_hours(settings: object) -> int:
     value = int(getattr(settings, "public_key_rotate_hours", PUBLIC_KEY_LIFETIME_HOURS) or PUBLIC_KEY_LIFETIME_HOURS)
+    return max(1, value)
+
+
+def _public_key_post_interval_hours(settings: object) -> int:
+    value = int(
+        getattr(settings, "public_key_post_interval_hours", PUBLIC_KEY_POST_INTERVAL_HOURS)
+        or PUBLIC_KEY_POST_INTERVAL_HOURS
+    )
     return max(1, value)
 
 
@@ -272,7 +293,7 @@ def _scheduled_public_key_post_at(now: datetime, post_hour_msk: int) -> datetime
     ).astimezone(now.tzinfo)
 
 
-def _next_public_key_post_at(*, last_posted_at: datetime, post_hour_msk: int) -> datetime:
+def _next_public_key_post_at(*, last_posted_at: datetime, post_hour_msk: int, interval_hours: int) -> datetime:
     last_posted_msk = last_posted_at.astimezone(PUBLIC_KEY_TIMEZONE)
     candidate = last_posted_msk.replace(
         hour=_public_key_post_hour_msk(post_hour_msk),
@@ -281,5 +302,5 @@ def _next_public_key_post_at(*, last_posted_at: datetime, post_hour_msk: int) ->
         microsecond=0,
     )
     if candidate <= last_posted_msk:
-        candidate += timedelta(days=1)
+        candidate += timedelta(hours=max(1, interval_hours))
     return candidate.astimezone(last_posted_at.tzinfo)

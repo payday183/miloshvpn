@@ -51,6 +51,7 @@ from app.services.vpn import (
     get_active_key,
     get_active_subscription,
     list_active_private_keys,
+    replace_active_private_key,
     revoke_private_key,
 )
 from app.tg import keyboards as kb
@@ -155,7 +156,13 @@ async def profile(message: Message) -> None:
         subscription_obj = await get_active_subscription(session, user.id)
         plan = await session.get(Plan, subscription_obj.plan_code) if subscription_obj is not None else None
         key = await get_active_key(session, user.id)
-    reply_markup = kb.admin_profile_keyboard(build_admin_profile_url(user.telegram_id)) if admin else kb.main_keyboard(admin)
+    if subscription_obj is not None and key is not None:
+        reply_markup = kb.profile_actions_keyboard(
+            admin_url=build_admin_profile_url(user.telegram_id) if admin else None,
+            include_replace=True,
+        )
+    else:
+        reply_markup = kb.admin_profile_keyboard(build_admin_profile_url(user.telegram_id)) if admin else kb.main_keyboard(admin)
     await message.answer(profile_text(user, subscription_obj, key, plan), reply_markup=reply_markup, parse_mode=ParseMode.HTML)
 
 
@@ -166,11 +173,39 @@ async def subscription(message: Message) -> None:
         subscription_obj = await get_active_subscription(session, user.id)
         plan = await session.get(Plan, subscription_obj.plan_code) if subscription_obj is not None else None
         key = await get_active_key(session, user.id)
+    reply_markup = (
+        kb.profile_actions_keyboard(include_replace=True)
+        if subscription_obj is not None and key is not None
+        else kb.main_keyboard(admin)
+    )
     await message.answer(
         profile_text(user, subscription_obj, key, plan),
-        reply_markup=kb.main_keyboard(admin),
+        reply_markup=reply_markup,
         parse_mode=ParseMode.HTML,
     )
+
+
+@router.callback_query(F.data == "replace_key")
+async def replace_key(callback: CallbackQuery) -> None:
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        try:
+            key = await replace_active_private_key(session, user)
+            subscription_obj = await get_active_subscription(session, user.id)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logging.exception("Failed to replace key for telegram_id=%s", callback.from_user.id)
+            await callback.answer("Не получилось заменить sub. Напишите в поддержку.", show_alert=True)
+            return
+
+    await callback.message.answer(f"✅ Sub заменён\n\n{subscription_text(subscription_obj, key)}", parse_mode=ParseMode.HTML)
+    await callback.answer("Sub заменён")
 
 
 @router.message((F.text == kb.BUY) | (F.text == "Купить пакет") | (F.text == kb.EXTEND))
@@ -343,8 +378,8 @@ async def check_payment(callback: CallbackQuery, bot: Bot) -> None:
             await callback.message.answer(
                 "⏳ Ваша оплата проверяется.\n\n"
                 "Подождите пару минут, DonationAlerts иногда отдаёт донат не сразу.\n\n"
-                "Когда backend увидит оплату, бот автоматически пришлёт вам ключ и подписка появится в Профиле.\n\n"
-                "Если произошла ошибка или ключ не пришёл через пару минут, напишите админу @miloshadmin — поможем.\n\n"
+                "Когда backend увидит оплату, бот автоматически пришлёт вам sub и подписка появится в Профиле.\n\n"
+                "Если произошла ошибка или sub не пришёл через пару минут, напишите админу @miloshadmin — поможем.\n\n"
                 "Проверьте, что в сообщении DonationAlerts был этот код:\n"
                 f"<code>{order.payment_code}</code>",
                 parse_mode=ParseMode.HTML,
@@ -1093,11 +1128,10 @@ async def admin_private_keys(message: Message) -> None:
         tg_id = user.telegram_id if user else "?"
         expires = key.expires_at.strftime("%d.%m.%Y %H:%M UTC") if key.expires_at else "без срока"
         plan = key.subscription.plan_code if key.subscription else key.key_type
-        node = key.node.title if key.node else "нода не задана"
         lines.append(
             f"#{key.id} — {username} / <code>{tg_id}</code>\n"
             f"Тариф: {plan}, до: {expires}\n"
-            f"Нода: {node}\n"
+            f"3x-ui: system sub\n"
         )
         buttons.append([InlineKeyboardButton(text=f"Удалить ключ #{key.id}", callback_data=f"admin_revoke_key:{key.id}")])
 

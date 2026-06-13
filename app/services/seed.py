@@ -1,10 +1,10 @@
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import BotAdmin, Plan, PublicKeyPostTemplate, VpnNode
+from app.models import BotAdmin, Plan, PublicKeyPostTemplate
 from app.timeutils import utcnow
 
 
@@ -48,29 +48,31 @@ PUBLIC_KEY_POST_TEMPLATES = [
             "{key_block}\n\n"
             "⏳ Живёт до: {expires}\n\n"
             "📦 Лимит: {traffic_gb} ГБ\n\n"
-            "Через {hours} ч ключ заменится автоматически."
+            "Следующий бесплатный sub: {next_free_key_at}."
         ),
     },
     {
         "code": "free_key_02",
         "title": "Интернет без лишних танцев",
         "body": (
-            "⚡ MiloshVPN подкинул бесплатный VLESS на сегодня.\n\n"
+            "⚡ MiloshVPN подкинул бесплатный sub на 24 часа.\n\n"
             "Без лишних танцев: скопировал, вставил в клиент, подключился.\n\n"
             "{key_block}\n\n"
             "⏳ До: {expires}\n\n"
-            "📦 Трафик: {traffic_gb} ГБ"
+            "📦 Трафик: {traffic_gb} ГБ\n\n"
+            "Следующий бесплатный sub: {next_free_key_at}."
         ),
     },
     {
         "code": "free_key_03",
         "title": "Проверочный вход",
         "body": (
-            "😎 Дорогой друг, вот бесплатный вход в MiloshVPN на сутки.\n\n"
+            "😎 Дорогой друг, вот бесплатный вход в MiloshVPN на 24 часа.\n\n"
             "Можно спокойно проверить скорость и белые списки.\n\n"
             "{key_block}\n\n"
             "⏳ Активен до: {expires}\n\n"
-            "📦 Лимит: {traffic_gb} ГБ"
+            "📦 Лимит: {traffic_gb} ГБ\n\n"
+            "Следующий бесплатный sub: {next_free_key_at}."
         ),
     },
     {
@@ -78,10 +80,11 @@ PUBLIC_KEY_POST_TEMPLATES = [
         "title": "Ключ дня",
         "body": (
             "🚀 Ключ дня подъехал.\n\n"
-            "Берёшь VLESS, импортируешь в клиент и смотришь, как интернет становится приятнее.\n\n"
+            "Берёшь sub-ссылку, импортируешь в клиент и смотришь, как интернет становится приятнее.\n\n"
             "{key_block}\n\n"
             "⏳ Работает до: {expires}\n\n"
-            "📦 Лимит на сутки: {traffic_gb} ГБ"
+            "📦 Лимит: {traffic_gb} ГБ\n\n"
+            "Следующий бесплатный sub: {next_free_key_at}."
         ),
     },
     {
@@ -92,29 +95,32 @@ PUBLIC_KEY_POST_TEMPLATES = [
             "Ключ ниже, копируй целиком:\n\n"
             "{key_block}\n\n"
             "⏳ До: {expires}\n\n"
-            "📦 {traffic_gb} ГБ на тест"
+            "📦 {traffic_gb} ГБ на тест\n\n"
+            "Следующий бесплатный sub: {next_free_key_at}."
         ),
     },
     {
         "code": "free_key_06",
-        "title": "Суточный тест",
+        "title": "24-часовой тест",
         "body": (
-            "🛡 Суточный тест MiloshVPN открыт.\n\n"
+            "🛡 24-часовой тест MiloshVPN открыт.\n\n"
             "Подключайся и проверяй нужные сервисы без лишней суеты.\n\n"
             "{key_block}\n\n"
             "⏳ Финиш: {expires}\n\n"
-            "📦 Лимит: {traffic_gb} ГБ"
+            "📦 Лимит: {traffic_gb} ГБ\n\n"
+            "Следующий бесплатный sub: {next_free_key_at}."
         ),
     },
     {
         "code": "free_key_07",
         "title": "Подарок каналу",
         "body": (
-            "🎁 Подарок каналу: бесплатный VLESS-ключ на 24 часа.\n\n"
+            "🎁 Подарок каналу: бесплатный sub на 24 часа.\n\n"
             "Если давно хотел попробовать MiloshVPN, сейчас самое время.\n\n"
             "{key_block}\n\n"
             "⏳ До: {expires}\n\n"
-            "📦 Трафик: {traffic_gb} ГБ"
+            "📦 Трафик: {traffic_gb} ГБ\n\n"
+            "Следующий бесплатный sub: {next_free_key_at}."
         ),
     },
     {
@@ -125,7 +131,8 @@ PUBLIC_KEY_POST_TEMPLATES = [
             "Для тех, кто хочет просто нормальный доступ, без странных плясок вокруг интернета.\n\n"
             "{key_block}\n\n"
             "⏳ Действует до: {expires}\n\n"
-            "📦 Лимит: {traffic_gb} ГБ"
+            "📦 Лимит: {traffic_gb} ГБ\n\n"
+            "Следующий бесплатный sub: {next_free_key_at}."
         ),
     },
     {
@@ -133,21 +140,23 @@ PUBLIC_KEY_POST_TEMPLATES = [
         "title": "Проверка связи",
         "body": (
             "📡 Проверка связи: новый бесплатный ключ уже здесь.\n\n"
-            "Копируй VLESS, импортируй в клиент и погнали.\n\n"
+            "Копируй sub-ссылку, импортируй в клиент и погнали.\n\n"
             "{key_block}\n\n"
             "⏳ До: {expires}\n\n"
-            "📦 На сегодня: {traffic_gb} ГБ"
+            "📦 Лимит: {traffic_gb} ГБ\n\n"
+            "Следующий бесплатный sub: {next_free_key_at}."
         ),
     },
     {
         "code": "free_key_10",
         "title": "Красивый тест",
         "body": (
-            "🌙 На сегодня у нас красивый тест MiloshVPN.\n\n"
-            "Ключ живёт сутки, лимит щедрый, дальше система сама заменит его новым.\n\n"
+            "🌙 Сегодня у нас красивый 24-часовой тест MiloshVPN.\n\n"
+            "Ключ живёт сутки, а дату следующего бесплатного sub смотри ниже.\n\n"
             "{key_block}\n\n"
             "⏳ До: {expires}\n\n"
-            "📦 Лимит: {traffic_gb} ГБ"
+            "📦 Лимит: {traffic_gb} ГБ\n\n"
+            "Следующий бесплатный sub: {next_free_key_at}."
         ),
     },
 ]
@@ -169,7 +178,7 @@ async def seed_defaults(session: AsyncSession) -> None:
 
     trial_payload = {
         "code": TRIAL_PLAN_CODE,
-        "title": "Бесплатный 7-дневный ключ",
+        "title": "Бесплатный 3-дневный ключ",
         "description": "Автоматический trial-доступ после старта бота.",
         "price_rub": Decimal("0.00"),
         "days": settings.free_trial_days,
@@ -202,26 +211,5 @@ async def seed_defaults(session: AsyncSession) -> None:
             template.title = payload["title"]
             template.body = payload["body"]
             template.is_active = True
-
-    node_count = await session.scalar(select(func.count()).select_from(VpnNode))
-    if not node_count:
-        session.add(
-            VpnNode(
-                title="Local test 3x-ui",
-                mode=settings.x3ui_mode,
-                base_url=settings.x3ui_base_url,
-                username=settings.x3ui_username,
-                password=settings.x3ui_password,
-                inbound_id=settings.x3ui_inbound_id,
-                max_clients=settings.x3ui_max_clients,
-                public_host=settings.vless_public_host,
-                public_port=settings.vless_public_port,
-                vless_query=settings.vless_query,
-                is_active=True,
-                status="unknown",
-                created_at=now,
-                updated_at=now,
-            )
-        )
 
     await session.commit()

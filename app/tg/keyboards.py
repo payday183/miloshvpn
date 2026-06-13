@@ -106,9 +106,14 @@ def confirm_payment_provider_keyboard(provider: str) -> InlineKeyboardMarkup:
     )
 
 
+def profile_actions_keyboard(*, admin_url: str | None = None, include_replace: bool = False) -> InlineKeyboardMarkup:
+    keyboard: list[list[InlineKeyboardButton]] = []
+    if include_replace:
+        keyboard.append([InlineKeyboardButton(text="Заменить sub", callback_data="replace_key")])
+    if admin_url:
+        keyboard.append([InlineKeyboardButton(text="Открыть профиль", url=admin_url)])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
 def admin_profile_keyboard(url: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Открыть профиль", url=url)],
-        ]
-    )
+    return profile_actions_keyboard(admin_url=url)

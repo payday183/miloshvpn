@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.db import get_session
-from app.models import BotAdmin, Order, Subscription, User, VpnKey, VpnNode
+from app.models import BotAdmin, Order, Subscription, User, VpnKey
 from app.services.admin_auth import (
     admin_panel_url_with_token,
     verify_admin_profile_signature,
@@ -21,8 +21,6 @@ from app.services.admin_keys import create_admin_key, create_admin_reality_key
 from app.services.billing import poll_donations
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
 from app.services.manual_orders import ManualOrderError, ManualOrderGrantResult, manually_confirm_order, search_orders_for_admin
-from app.services.node_monitor import format_bytes, local_key_counts, refresh_all_nodes, refresh_node_status
-from app.services.nodes import activate_node, create_node, disable_node, list_nodes, update_node
 from app.services.payment_notifications import notify_paid_order
 from app.services.payment_modes import (
     get_active_payment_provider,
@@ -32,6 +30,7 @@ from app.services.payment_modes import (
 )
 from app.services.public_keys import rotate_public_key
 from app.services.stats import collect_stats
+from app.services.system_x3ui import collect_system_x3ui_state
 from app.services.vpn import list_active_private_keys, revoke_private_key
 from app.timeutils import utcnow
 
@@ -88,115 +87,14 @@ async def admin_panel(
 ) -> HTMLResponse:
     token = request.query_params.get("token", "")
     stats = await collect_stats(session)
-    nodes = await list_nodes(session)
-    node_counts = {node.id: await local_key_counts(session, node.id) for node in nodes}
+    system_state = await collect_system_x3ui_state()
     subscriptions = await active_subscriptions(session)
     pending_orders = await latest_pending_orders(session)
     private_keys = await list_active_private_keys(session, limit=100)
     payment_provider = await get_active_payment_provider(session)
     return HTMLResponse(
-        render_admin_page(stats, nodes, node_counts, subscriptions, pending_orders, private_keys, token, payment_provider)
+        render_admin_page(stats, system_state, subscriptions, pending_orders, private_keys, token, payment_provider)
     )
-
-
-@router.post("/admin/nodes")
-async def create_node_action(
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-    _: None = Depends(require_admin_token),
-) -> RedirectResponse:
-    form = await request.form()
-    await create_node(
-        session,
-        title=str(form.get("title") or "New node"),
-        mode=str(form.get("mode") or "mock"),
-        base_url=str(form.get("base_url") or "https://x3ui:2053"),
-        username=str(form.get("username") or "admin"),
-        password=str(form.get("password") or "admin"),
-        inbound_id=int(str(form.get("inbound_id") or "1")),
-        max_clients=int(str(form.get("max_clients") or "10")),
-        public_host=str(form.get("public_host") or "127.0.0.1"),
-        public_port=int(str(form.get("public_port") or "8443")),
-        vless_query=str(form.get("vless_query") or "type=tcp&security=none"),
-        activate=str(form.get("activate") or "") == "on",
-    )
-    return redirect_to_admin(request)
-
-
-@router.post("/admin/nodes/{node_id}/activate")
-async def activate_node_action(
-    node_id: int,
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-    _: None = Depends(require_admin_token),
-) -> RedirectResponse:
-    await activate_node(session, node_id)
-    return redirect_to_admin(request)
-
-
-@router.post("/admin/nodes/{node_id}/update")
-async def update_node_action(
-    node_id: int,
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-    _: None = Depends(require_admin_token),
-) -> RedirectResponse:
-    form = await request.form()
-    try:
-        await update_node(
-            session,
-            node_id,
-            title=str(form.get("title") or "VPN node"),
-            mode=str(form.get("mode") or "mock"),
-            base_url=str(form.get("base_url") or "https://x3ui:2053"),
-            username=str(form.get("username") or "admin"),
-            password=str(form.get("password") or "").strip() or None,
-            inbound_id=int(str(form.get("inbound_id") or "1")),
-            max_clients=int(str(form.get("max_clients") or "10")),
-            public_host=str(form.get("public_host") or "127.0.0.1"),
-            public_port=int(str(form.get("public_port") or "8443")),
-            vless_query=str(form.get("vless_query") or "type=tcp&security=none"),
-            activate=str(form.get("activate") or "") == "on",
-        )
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Node not found")
-    return redirect_to_admin(request)
-
-
-@router.post("/admin/nodes/{node_id}/disable")
-async def disable_node_action(
-    node_id: int,
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-    _: None = Depends(require_admin_token),
-) -> RedirectResponse:
-    await disable_node(session, node_id)
-    return redirect_to_admin(request)
-
-
-@router.post("/admin/nodes/{node_id}/refresh")
-async def refresh_node_action(
-    node_id: int,
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-    _: None = Depends(require_admin_token),
-) -> RedirectResponse:
-    node = await session.get(VpnNode, node_id)
-    if node is None:
-        raise HTTPException(status_code=404, detail="Node not found")
-    await refresh_node_status(session, node)
-    await session.commit()
-    return redirect_to_admin(request)
-
-
-@router.post("/admin/nodes/refresh")
-async def refresh_nodes_action(
-    request: Request,
-    session: AsyncSession = Depends(get_session),
-    _: None = Depends(require_admin_token),
-) -> RedirectResponse:
-    await refresh_all_nodes(session)
-    return redirect_to_admin(request)
 
 
 @router.post("/admin/donations/poll")
@@ -356,15 +254,6 @@ async def notify_admin_reality_key_from_web(telegram_id: int, key: VpnKey) -> bo
         await bot.session.close()
 
 
-@router.get("/api/admin/nodes")
-async def api_nodes(
-    session: AsyncSession = Depends(get_session),
-    _: None = Depends(require_admin_token),
-) -> list[dict[str, object]]:
-    nodes = await list_nodes(session)
-    return [serialize_node(node, await local_key_counts(session, node.id)) for node in nodes]
-
-
 @router.get("/api/admin/subscriptions")
 async def api_subscriptions(
     session: AsyncSession = Depends(get_session),
@@ -420,7 +309,7 @@ async def active_subscriptions(session: AsyncSession) -> list[tuple[Subscription
             .options(
                 selectinload(Subscription.user),
                 selectinload(Subscription.plan),
-                selectinload(Subscription.keys).selectinload(VpnKey.node),
+                selectinload(Subscription.keys),
             )
             .where(Subscription.status == "active", Subscription.expires_at > utcnow())
             .order_by(Subscription.expires_at.desc())
@@ -454,33 +343,6 @@ def redirect_to_admin(request: Request) -> RedirectResponse:
     return RedirectResponse(url=f"/admin{suffix}", status_code=303)
 
 
-def serialize_node(node: VpnNode, counts: dict[str, int]) -> dict[str, object]:
-    return {
-        "id": node.id,
-        "title": node.title,
-        "mode": node.mode,
-        "base_url": node.base_url,
-        "inbound_id": node.inbound_id,
-        "max_clients": node.max_clients,
-        "public_host": node.public_host,
-        "public_port": node.public_port,
-        "is_active": node.is_active,
-        "status": node.status,
-        "last_checked_at": node.last_checked_at.isoformat() if node.last_checked_at else None,
-        "last_error": node.last_error,
-        "latency_ms": node.last_latency_ms,
-        "local_keys_total": counts["total"],
-        "local_keys_active": counts["active"],
-        "remote_clients": node.remote_clients,
-        "remote_enabled_clients": node.remote_enabled_clients,
-        "traffic_up_bytes": node.traffic_up_bytes,
-        "traffic_down_bytes": node.traffic_down_bytes,
-        "cpu_percent": node.cpu_percent,
-        "memory_percent": node.memory_percent,
-        "disk_percent": node.disk_percent,
-    }
-
-
 def serialize_subscription(subscription: Subscription, key: VpnKey | None) -> dict[str, object]:
     user = subscription.user
     return {
@@ -489,7 +351,6 @@ def serialize_subscription(subscription: Subscription, key: VpnKey | None) -> di
         "username": user.username,
         "plan": subscription.plan_code,
         "expires_at": subscription.expires_at.isoformat(),
-        "node": key.node.title if key and key.node else None,
         "key_active": key.active if key else False,
     }
 
@@ -658,8 +519,7 @@ def profile_page_css() -> str:
 
 def render_admin_page(
     stats: dict[str, int],
-    nodes: list[VpnNode],
-    node_counts: dict[int, dict[str, int]],
+    system_state: dict[str, object],
     subscriptions: list[tuple[Subscription, VpnKey | None]],
     pending_orders: list[Order],
     private_keys: list[VpnKey],
@@ -670,9 +530,7 @@ def render_admin_page(
     token_qs = f"?{urlencode({'token': token})}" if token else ""
     token_input = hidden_token_input(token)
     default_admin_id = str(settings.admin_ids[0]) if settings.admin_ids else ""
-    node_rows = "\n".join(render_node_row(node, node_counts.get(node.id, {}), token_qs) for node in nodes) or table_empty(
-        "Нод пока нет"
-    )
+    system_status = render_system_x3ui_status(system_state)
     sub_rows = "\n".join(render_subscription_row(subscription, key) for subscription, key in subscriptions) or table_empty(
         "Активных подписок пока нет"
     )
@@ -808,23 +666,6 @@ def render_admin_page(
         align-items: center;
         flex-wrap: wrap;
       }}
-      details.node-edit {{
-        width: min(520px, 80vw);
-      }}
-      details.node-edit summary {{
-        cursor: pointer;
-        color: #1563ff;
-        font-size: 13px;
-        margin-bottom: 8px;
-      }}
-      form.node-edit-grid {{
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-        gap: 8px;
-      }}
-      form.node-edit-grid label.wide {{
-        grid-column: 1 / -1;
-      }}
       .badge {{
         display: inline-block;
         border-radius: 999px;
@@ -844,6 +685,9 @@ def render_admin_page(
       .muted {{
         color: #687385;
         font-size: 12px;
+      }}
+      .error {{
+        color: #a51d2d;
       }}
       code {{
         word-break: break-all;
@@ -893,49 +737,8 @@ def render_admin_page(
       </section>
 
       <section class="panel">
-        <h2>Ноды</h2>
-        <div class="actions" style="margin-bottom: 12px;">
-          <form method="post" action="/admin/nodes/refresh{token_qs}"><button type="submit">Обновить статус всех нод</button></form>
-        </div>
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Название</th>
-              <th>3x-ui</th>
-              <th>VLESS</th>
-              <th>Статус</th>
-              <th>Ключи</th>
-              <th>Трафик</th>
-              <th>Нагрузка</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>{node_rows}</tbody>
-        </table>
-      </section>
-
-      <section class="panel">
-        <h2>Подключить ноду</h2>
-        <form method="post" action="/admin/nodes{token_qs}" class="grid">
-          <label>Название<input name="title" value="New 3x-ui node"></label>
-          <label>Режим
-            <select name="mode">
-              <option value="mock">mock</option>
-              <option value="live">live</option>
-            </select>
-          </label>
-          <label>3x-ui URL<input name="base_url" value="https://x3ui:2053"></label>
-          <label>Логин<input name="username" value="admin"></label>
-          <label>Пароль<input name="password" value="admin" type="password"></label>
-          <label>Inbound ID<input name="inbound_id" value="1" type="number"></label>
-          <label>Max clients<input name="max_clients" value="10" type="number"></label>
-          <label>Public host<input name="public_host" value="127.0.0.1"></label>
-          <label>Public port<input name="public_port" value="8443" type="number"></label>
-          <label>VLESS query<input name="vless_query" value="type=tcp&security=none"></label>
-          <label><input name="activate" type="checkbox" checked> Использовать для пользователей</label>
-          <div class="actions"><button type="submit">Добавить ноду</button></div>
-        </form>
+        <h2>Системная 3x-ui</h2>
+        {system_status}
       </section>
 
       <section class="panel">
@@ -947,7 +750,6 @@ def render_admin_page(
               <th>Пользователь</th>
               <th>Тариф</th>
               <th>До</th>
-              <th>Нода</th>
               <th>Ключ</th>
             </tr>
           </thead>
@@ -964,7 +766,6 @@ def render_admin_page(
               <th>Пользователь</th>
               <th>Тариф</th>
               <th>До</th>
-              <th>Нода</th>
               <th>Label</th>
               <th></th>
             </tr>
@@ -1003,7 +804,7 @@ def render_admin_page(
 def render_admin_key_page(key: VpnKey, telegram_id: int, token: str, *, reality: bool = False) -> str:
     token_qs = f"?{urlencode({'token': token})}" if token else ""
     heading = "Админский Reality test key создан" if reality else "Админский ключ создан"
-    key_label = "VLESS TCP Reality ключ" if reality else "VLESS ключ"
+    key_label = "Reality sub-ссылка" if reality else "Sub-ссылка"
     return f"""<!doctype html>
 <html lang="ru">
   <head>
@@ -1088,15 +889,15 @@ def render_order_search_page(query: str, orders: list[Order], token: str) -> str
 def render_manual_order_grant_page(result: ManualOrderGrantResult, notified: bool, token: str) -> str:
     token_qs = f"?{urlencode({'token': token})}" if token else ""
     if result.granted:
-        action = "Заказ отмечен оплаченным, подписка применена, ключ создан."
+        action = "Заказ отмечен оплаченным, подписка применена, sub создан."
     elif result.repaired_key:
-        action = "Заказ уже был оплачен, отсутствующий ключ пересоздан."
+        action = "Заказ уже был оплачен, отсутствующий sub пересоздан."
     elif result.was_already_paid:
         action = "Заказ уже был оплачен, срок повторно не продлевался."
     else:
         action = "Заказ проверен."
-    notified_text = "Сообщение с ключом отправлено пользователю." if notified else (
-        "Сообщение отправить не удалось. Ключ уже применён в профиле, можно написать пользователю вручную."
+    notified_text = "Сообщение с sub отправлено пользователю." if notified else (
+        "Сообщение отправить не удалось. Sub уже применён в профиле, можно написать пользователю вручную."
     )
     return f"""<!doctype html>
 <html lang="ru">
@@ -1312,6 +1113,35 @@ def render_stat(label: str, value: int) -> str:
     return f'<div class="stat"><span>{escape(label)}</span><strong>{value}</strong></div>'
 
 
+def render_system_x3ui_status(state: dict[str, object]) -> str:
+    status = str(state.get("status") or "unknown")
+    nodes = state.get("nodes") if isinstance(state.get("nodes"), list) else []
+    inbounds = state.get("inbounds") if isinstance(state.get("inbounds"), list) else []
+    error = str(state.get("error") or "")
+    status_class = "active" if status == "online" else "offline" if status == "offline" else ""
+    enabled_nodes = sum(1 for node in nodes if isinstance(node, dict) and node.get("enable") is not False)
+    online_nodes = sum(
+        1
+        for node in nodes
+        if isinstance(node, dict)
+        and node.get("enable") is not False
+        and str(node.get("status") or "online").lower() == "online"
+    )
+    remote_inbounds = sum(1 for inbound in inbounds if isinstance(inbound, dict) and inbound.get("nodeId") is not None)
+    local_inbounds = sum(1 for inbound in inbounds if isinstance(inbound, dict) and inbound.get("nodeId") is None)
+    error_html = f'<p class="error">{escape(error)}</p>' if error else ""
+    return f"""
+        <p class="muted" style="margin-top: 0;">Бот использует системную 3x-ui, установленную на сервере, без Docker-контейнера 3x-ui.</p>
+        <div class="stats">
+          <div class="stat"><span>Статус панели</span><strong><span class="badge {status_class}">{escape(status)}</span></strong></div>
+          <div class="stat"><span>Nodes online</span><strong>{online_nodes}/{enabled_nodes}</strong></div>
+          <div class="stat"><span>User inbound’ы node</span><strong>{remote_inbounds}</strong></div>
+          <div class="stat"><span>System inbound’ы admin</span><strong>{local_inbounds}</strong></div>
+        </div>
+        {error_html}
+    """
+
+
 def render_payment_provider_button(code: str, label: str, active_provider: str, token_qs: str) -> str:
     css_class = "secondary" if code != active_provider else ""
     suffix = " ✓" if code == active_provider else ""
@@ -1323,91 +1153,15 @@ def render_payment_provider_button(code: str, label: str, active_provider: str, 
     )
 
 
-def render_node_row(node: VpnNode, counts: dict[str, int], token_qs: str) -> str:
-    active = '<span class="badge active">active</span>' if node.is_active else '<span class="badge">off</span>'
-    status_class = "active" if node.status == "online" else "offline" if node.status == "offline" else ""
-    status = f'<span class="badge {status_class}">{escape(node.status)}</span>'
-    checked = node.last_checked_at.strftime("%d.%m %H:%M UTC") if node.last_checked_at else "еще не проверялась"
-    error = f'<br><span class="muted">{escape(node.last_error)}</span>' if node.last_error else ""
-    local_total = counts.get("total", 0)
-    local_active = counts.get("active", 0)
-    private_active = counts.get("private_active", 0)
-    public_active = counts.get("public_active", 0)
-    traffic = format_bytes(node.traffic_up_bytes + node.traffic_down_bytes)
-    load = "<br>".join(
-        [
-            f"CPU: {percent_text(node.cpu_percent)}",
-            f"RAM: {percent_text(node.memory_percent)}",
-            f"Disk: {percent_text(node.disk_percent)}",
-        ]
-    )
-    action = (
-        f'<form method="post" action="/admin/nodes/{node.id}/disable{token_qs}">'
-        '<button class="danger" type="submit">Отключить</button></form>'
-        if node.is_active
-        else f'<form method="post" action="/admin/nodes/{node.id}/activate{token_qs}">'
-        '<button type="submit">В пул пользователей</button></form>'
-    )
-    mock_selected = " selected" if node.mode == "mock" else ""
-    live_selected = " selected" if node.mode == "live" else ""
-    activate_checked = " checked" if node.is_active else ""
-    edit_form = f"""
-        <details class="node-edit">
-          <summary>Настроить</summary>
-          <form method="post" action="/admin/nodes/{node.id}/update{token_qs}" class="node-edit-grid">
-            <label>Название<input name="title" value="{escape(node.title)}"></label>
-            <label>Режим
-              <select name="mode">
-                <option value="mock"{mock_selected}>mock</option>
-                <option value="live"{live_selected}>live</option>
-              </select>
-            </label>
-            <label class="wide">3x-ui URL<input name="base_url" value="{escape(node.base_url)}"></label>
-            <label>Логин<input name="username" value="{escape(node.username)}"></label>
-            <label>Новый пароль<input name="password" type="password" placeholder="не менять"></label>
-            <label>Inbound ID<input name="inbound_id" value="{node.inbound_id}" type="number"></label>
-            <label>Max clients<input name="max_clients" value="{node.max_clients}" type="number"></label>
-            <label>Public host<input name="public_host" value="{escape(node.public_host)}"></label>
-            <label>Public port<input name="public_port" value="{node.public_port}" type="number"></label>
-            <label class="wide">VLESS query<input name="vless_query" value="{escape(node.vless_query)}"></label>
-            <label class="wide"><input name="activate" type="checkbox"{activate_checked}> Использовать для пользователей</label>
-            <div class="actions"><button class="secondary" type="submit">Сохранить</button></div>
-          </form>
-        </details>
-    """
-    return f"""<tr>
-      <td>{node.id}</td>
-      <td>{escape(node.title)}<br><span class="badge">{escape(node.mode)}</span> {active}</td>
-      <td><code>{escape(node.base_url)}</code><br>inbound {node.inbound_id}<br><span class="muted">limit {node.max_clients}</span></td>
-      <td><code>{escape(node.public_host)}:{node.public_port}</code></td>
-      <td>{status}<br><span class="muted">{checked}</span>{error}<br><span class="muted">{node.last_latency_ms or 0} ms</span></td>
-      <td>
-        local: {local_active}/{local_total}<br>
-        private: {private_active}<br>
-        free: {public_active}<br>
-        3x-ui: {node.remote_enabled_clients}/{node.remote_clients}
-      </td>
-      <td>
-        total: {traffic}<br>
-        up: {format_bytes(node.traffic_up_bytes)}<br>
-        down: {format_bytes(node.traffic_down_bytes)}
-      </td>
-      <td>{load}</td>
-      <td><div class="actions">{action}<form method="post" action="/admin/nodes/{node.id}/refresh{token_qs}"><button class="secondary" type="submit">Статус</button></form>{edit_form}</div></td>
-    </tr>"""
-
-
 def render_subscription_row(subscription: Subscription, key: VpnKey | None) -> str:
     user = subscription.user
     username = f"@{escape(user.username)}" if user.username else ""
-    node_title = escape(key.node.title) if key and key.node else "не задана"
     key_status = '<span class="badge active">active</span>' if key and key.active else '<span class="badge">no key</span>'
     return f"""<tr>
       <td>{subscription.id}</td>
       <td><code>{user.telegram_id}</code><br>{username}</td>
       <td>{escape(subscription.plan_code)}</td>
       <td>{subscription.expires_at:%d.%m.%Y %H:%M UTC}</td>
-      <td>{node_title}</td>
       <td>{key_status}</td>
     </tr>"""
 
@@ -1418,13 +1172,11 @@ def render_private_key_row(key: VpnKey, token_qs: str) -> str:
     telegram_id = user.telegram_id if user else ""
     plan = key.subscription.plan_code if key.subscription else key.key_type
     expires = key.expires_at.strftime("%d.%m.%Y %H:%M UTC") if key.expires_at else "без срока"
-    node_title = escape(key.node.title) if key.node else "не задана"
     return f"""<tr>
       <td>{key.id}</td>
       <td><code>{telegram_id}</code><br>{username}</td>
       <td>{escape(plan)}</td>
       <td>{expires}</td>
-      <td>{node_title}</td>
       <td><code>{escape(key.email)}</code></td>
       <td>
         <form method="post" action="/admin/keys/{key.id}/revoke{token_qs}">
@@ -1453,7 +1205,3 @@ def render_order_row(order: Order, token_qs: str) -> str:
 
 def table_empty(text: str) -> str:
     return f'<tr><td colspan="8">{escape(text)}</td></tr>'
-
-
-def percent_text(value: int | None) -> str:
-    return f"{value}%" if value is not None else "n/a"

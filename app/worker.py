@@ -8,7 +8,6 @@ from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.services.billing import poll_donations
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
-from app.services.node_monitor import refresh_all_nodes
 from app.services.payment_notifications import notify_paid_orders
 from app.services.payment_moderation import expire_unconfirmed_orders
 from app.services.public_keys import (
@@ -19,6 +18,8 @@ from app.services.public_keys import (
     rotate_public_key,
     seconds_until_next_public_key_post,
 )
+from app.services.system_x3ui import collect_system_x3ui_state
+from app.services.x3ui import X3UIError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -84,6 +85,9 @@ async def public_key_loop() -> None:
                             sleep_seconds = max(60, await seconds_until_next_public_key_post(session))
                     else:
                         sleep_seconds = max(60, seconds_left)
+                except X3UIError as exc:
+                    logger.warning("Skipping public key rotation: %s", exc)
+                    sleep_seconds = max(300, settings.node_status_poll_interval_seconds)
                 except Exception:
                     logger.exception("Public key rotation failed")
         await asyncio.sleep(sleep_seconds)
@@ -92,13 +96,17 @@ async def public_key_loop() -> None:
 async def node_status_loop() -> None:
     settings = get_settings()
     while True:
-        async with SessionLocal() as session:
-            try:
-                nodes = await refresh_all_nodes(session)
-                if nodes:
-                    logger.info("Refreshed VPN nodes: %s", len(nodes))
-            except Exception:
-                logger.exception("Node status polling failed")
+        try:
+            state = await collect_system_x3ui_state()
+            logger.info(
+                "System 3x-ui state: status=%s nodes=%s inbounds=%s error=%s",
+                state.get("status"),
+                len(state.get("nodes") or []),
+                len(state.get("inbounds") or []),
+                state.get("error") or "",
+            )
+        except Exception:
+            logger.exception("System 3x-ui status polling failed")
         await asyncio.sleep(settings.node_status_poll_interval_seconds)
 
 

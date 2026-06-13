@@ -12,7 +12,7 @@ async def expire_subscriptions(session: AsyncSession, *, limit: int = 200) -> di
     subscriptions = (
         await session.scalars(
             select(Subscription)
-            .options(selectinload(Subscription.keys).selectinload(VpnKey.node))
+            .options(selectinload(Subscription.keys))
             .where(Subscription.status == "active", Subscription.expires_at <= now)
             .order_by(Subscription.expires_at)
             .limit(limit)
@@ -31,7 +31,7 @@ async def expire_subscriptions(session: AsyncSession, *, limit: int = 200) -> di
             if not key.active:
                 continue
             try:
-                await X3UIClient(node=key.node).revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+                await X3UIClient().revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
             except Exception:
                 # Keep the key active so the next cleanup pass retries the 3x-ui deletion.
                 failed_revokes += 1
@@ -54,7 +54,7 @@ async def retry_expired_key_revokes(session: AsyncSession, *, limit: int = 200) 
     keys = (
         await session.scalars(
             select(VpnKey)
-            .options(selectinload(VpnKey.node), selectinload(VpnKey.subscription))
+            .options(selectinload(VpnKey.subscription))
             .where(
                 VpnKey.active.is_(True),
                 VpnKey.key_type == "private",
@@ -72,7 +72,7 @@ async def retry_expired_key_revokes(session: AsyncSession, *, limit: int = 200) 
             key.subscription.status = "expired"
 
         try:
-            await X3UIClient(node=key.node).revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+            await X3UIClient().revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
         except Exception:
             failed_revokes += 1
             continue

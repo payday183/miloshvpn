@@ -19,7 +19,6 @@ class Settings(BaseSettings):
     bot_token: str = ""
     bot_username: str = ""
     admin_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
-    admin_reserved_node_ids: Annotated[list[int], NoDecode] = Field(default_factory=lambda: [1])
     admin_web_token: str = ""
     admin_panel_url: str = "http://localhost:8081/admin"
 
@@ -31,12 +30,19 @@ class Settings(BaseSettings):
     payment_amount_tolerance_rub: Decimal = Decimal("2.00")
 
     x3ui_mode: Literal["mock", "live"] = "mock"
-    x3ui_base_url: str = "https://x3ui:2053"
+    x3ui_base_url: str = "https://host.docker.internal:24475"
+    x3ui_web_base_path: str = ""
+    x3ui_sub_base_url: str = ""
     x3ui_tls_verify: bool = False
     x3ui_username: str = "admin"
     x3ui_password: str = "admin"
+    my_3x_ui_login: str = ""
+    my_3x_ui_password: str = ""
     x3ui_inbound_id: int = 1
     x3ui_max_clients: int = 10
+    x3ui_user_inbound_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
+    x3ui_admin_inbound_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
+    x3ui_public_inbound_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
     node_selection_mode: Literal["active", "least_loaded"] = "least_loaded"
     node_overload_cpu_percent: int = 85
     node_overload_memory_percent: int = 90
@@ -52,17 +58,24 @@ class Settings(BaseSettings):
 
     public_key_enabled: bool = True
     public_key_rotate_hours: int = 24
+    public_key_post_interval_hours: int = 48
     public_key_traffic_gb: int = 500
     public_key_post_hour_msk: int = 14
     public_key_chat_id: str = ""
     free_trial_enabled: bool = True
-    free_trial_days: int = 7
+    free_trial_days: int = 3
     free_trial_traffic_gb: int = 10
-    node_status_poll_interval_seconds: int = 60
+    node_status_poll_interval_seconds: int = 3600
     expired_subscription_cleanup_enabled: bool = True
     expired_subscription_cleanup_interval_seconds: int = 300
 
-    @field_validator("admin_ids", "admin_reserved_node_ids", mode="before")
+    @field_validator(
+        "admin_ids",
+        "x3ui_user_inbound_ids",
+        "x3ui_admin_inbound_ids",
+        "x3ui_public_inbound_ids",
+        mode="before",
+    )
     @classmethod
     def parse_int_list(cls, value: object) -> list[int]:
         if value is None or value == "":

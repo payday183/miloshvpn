@@ -1,0 +1,19 @@
+MiloshVPN system 3x-ui inventory
+Generated UTC: 2026-06-13 11:37:22 UTC
+Panel status: online
+
+Nodes (0):
+- none; remote nodes are not connected yet
+
+Inbounds (6):
+- id=2; remark=nl  MiloshVPN Vless; port=59911; protocol=vless; network=tcp; security=reality; enabled=True; clients=4; system/local (nodeId=None)
+- id=3; remark=nl  MiloshVPN XHTTP; port=13241; protocol=vless; network=xhttp; security=reality; enabled=True; clients=4; system/local (nodeId=None)
+- id=4; remark=nl  MiloshVPN Hysteria; port=57280; protocol=hysteria; network=hysteria; security=tls; enabled=True; clients=4; system/local (nodeId=None)
+- id=6; remark=nl  MiloshVPN VlessFul1; port=22986; protocol=vless; network=tcp; security=reality; enabled=True; clients=2; system/local (nodeId=None)
+- id=7; remark=nl  MiloshVPN VlessFul2; port=41837; protocol=vless; network=tcp; security=reality; enabled=True; clients=2; system/local (nodeId=None)
+- id=10; remark=nl  MiloshVPN VlessFul5(none); port=13163; protocol=vless; network=tcp; security=none; enabled=True; clients=2; system/local (nodeId=None)
+
+Selection rules observed:
+- admin: uses system/local inbounds without nodeId; selected ids 2, 3, 4, 6, 7, 10.
+- admin_reality: uses configured Reality inbound; selected id 2.
+- user/public: waits for remote node inbounds with nodeId; currently unavailable because no nodes are connected.

@@ -12,7 +12,7 @@ def start_text(user: User, is_admin: bool, trial_created: bool = False, trial_fa
     if trial_failed:
         trial_line = "Trial-ключ не выдался автоматически. Загляни в поддержку, поможем без паники."
     elif trial_created:
-        trial_line = "Подарок на входе: 7-дневный ключ уже в твоём Профиле."
+        trial_line = "Подарок на входе: 3-дневный ключ уже в твоём Профиле."
     else:
         trial_line = "Ключ, подписка и сроки лежат в Профиле."
     admin_line = "\n\n🛠 Админка тоже рядом, отдельной кнопкой." if is_admin else ""
@@ -39,7 +39,7 @@ def profile_text(user: User, subscription: Subscription | None, key: VpnKey | No
 
     title = plan.title if plan is not None else subscription.plan_code
     if subscription.plan_code == TRIAL_PLAN_CODE:
-        title = "Бесплатный 7-дневный ключ"
+        title = "Бесплатный 3-дневный ключ"
     traffic = "без лимита" if subscription.traffic_limit_gb is None else f"{subscription.traffic_limit_gb} ГБ"
     lines.append(
         "\n\n💎 Моя подписка\n"
@@ -51,7 +51,7 @@ def profile_text(user: User, subscription: Subscription | None, key: VpnKey | No
     )
 
     if key is not None:
-        lines.append(f"\n\n🔑 Мой ключ:\n<code>{escape(key.vless_uri)}</code>")
+        lines.append(f"\n\n🔑 Мой sub:\n<code>{escape(key.vless_uri)}</code>")
     else:
         lines.append("\n\n🔑 Ключ пока не выдан. Открой /start или напиши в поддержку.")
     return "".join(lines)
@@ -266,7 +266,7 @@ def subscription_text(subscription: Subscription | None, key: VpnKey | None) -> 
         return "Подписки пока нет. Жми <b>Купить</b>, выберем тебе хороший вход."
 
     traffic = "без лимита" if subscription.traffic_limit_gb is None else f"{subscription.traffic_limit_gb} ГБ"
-    title = "Бесплатный 7-дневный ключ" if subscription.plan_code == TRIAL_PLAN_CODE else subscription.plan_code
+    title = "Бесплатный 3-дневный ключ" if subscription.plan_code == TRIAL_PLAN_CODE else subscription.plan_code
     text = (
         "💎 Моя подписка\n\n"
         f"Тариф: {title}\n"
@@ -276,7 +276,7 @@ def subscription_text(subscription: Subscription | None, key: VpnKey | None) -> 
         f"Лимит: {traffic}"
     )
     if key is not None:
-        text += f"\n\n🔑 VLESS ключ:\n<code>{escape(key.vless_uri)}</code>"
+        text += f"\n\n🔑 Sub-ссылка:\n<code>{escape(key.vless_uri)}</code>"
     else:
         text += "\n\nКлюч ещё не выдан. Напиши в поддержку, разберёмся."
     return text
@@ -285,7 +285,7 @@ def subscription_text(subscription: Subscription | None, key: VpnKey | None) -> 
 def payment_success_text(subscription: Subscription | None, key: VpnKey | None) -> str:
     return (
         "✅ Оплата прошла!\n\n"
-        "Вот ваш ключ. Спасибо за ваше доверие 💙\n\n"
+        "Вот ваша sub-ссылка. Спасибо за ваше доверие 💙\n\n"
         f"{subscription_text(subscription, key)}"
     )
 
@@ -294,7 +294,7 @@ def admin_key_text(key: VpnKey) -> str:
     return (
         "Админский ключ создан без оплаты.\n\n"
         f"Label: <code>{escape(key.email)}</code>\n"
-        f"VLESS ключ:\n<code>{escape(key.vless_uri)}</code>"
+        f"Sub-ссылка:\n<code>{escape(key.vless_uri)}</code>"
     )
 
 
@@ -302,7 +302,7 @@ def admin_reality_key_text(key: VpnKey) -> str:
     return (
         "Админский Reality test key создан без оплаты.\n\n"
         f"Label: <code>{escape(key.email)}</code>\n"
-        f"VLESS TCP Reality ключ:\n<code>{escape(key.vless_uri)}</code>"
+        f"Reality sub-ссылка:\n<code>{escape(key.vless_uri)}</code>"
     )
 
 
@@ -342,16 +342,16 @@ def admin_order_result_text(order: Order) -> str:
 
 def admin_manual_grant_result_text(result: ManualOrderGrantResult, notified: bool) -> str:
     if result.granted:
-        action = "✅ Заказ вручную отмечен оплаченным, подписка применена, ключ создан."
+        action = "✅ Заказ вручную отмечен оплаченным, подписка применена, sub создан."
     elif result.repaired_key:
-        action = "✅ Заказ уже был оплачен, отсутствующий ключ пересоздан."
+        action = "✅ Заказ уже был оплачен, отсутствующий sub пересоздан."
     elif result.was_already_paid:
         action = "ℹ️ Заказ уже был оплачен, срок повторно не продлевал."
     else:
         action = "ℹ️ Заказ проверен."
 
-    notify_line = "Пользователю отправлено сообщение с ключом." if notified else (
-        "Сообщение пользователю отправить не получилось. Ключ уже в профиле, можно написать ему вручную."
+    notify_line = "Пользователю отправлено сообщение с sub." if notified else (
+        "Сообщение пользователю отправить не получилось. Sub уже в профиле, можно написать ему вручную."
     )
     return (
         f"{action}\n\n"
@@ -366,7 +366,7 @@ def instruction_text() -> str:
     return (
         "📘 Инструкция\n\n"
         "1. Установи V2RayNG, Hiddify, Streisand или другой клиент с VLESS.\n"
-        "\n2. Открой <b>Профиль</b> и скопируй VLESS-ключ.\n"
+        "\n2. Открой <b>Профиль</b> и скопируй sub-ссылку.\n"
         "\n3. Импортируй ключ из буфера обмена.\n"
         "\n"
         "4. Подключись и проверь Telegram, YouTube, Instagram и обычные сайты.\n\n"
@@ -379,7 +379,7 @@ def policy_text() -> str:
     return (
         "🛡 Политика проекта\n\n"
         "1. Один ключ — один владелец и один нормальный сценарий использования.\n"
-        "2. Trial даётся один раз на 7 дней и имеет лимит трафика.\n"
+        "2. Trial даётся один раз на 3 дня и имеет лимит трафика.\n"
         "3. Торренты, Tor, спам, сканирование и жёсткая нагрузка запрещены.\n"
         "4. Оплата засчитывается только с правильной суммой и персональным кодом.\n"
         "5. Мы не продаём интернет как товар: суммы — это поддержка проекта, чтобы серверы работали стабильно.\n"

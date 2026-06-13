@@ -4,14 +4,13 @@ from datetime import datetime
 from decimal import Decimal
 import json
 import time
-from typing import Any
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit
+from typing import Any, Sequence
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
 from uuid import uuid4
 
 import httpx
 
 from app.config import Settings, get_settings
-from app.models import VpnNode
 
 
 @dataclass(frozen=True)
@@ -19,6 +18,9 @@ class ProvisionedClient:
     client_uuid: str
     email: str
     vless_uri: str
+    sub_id: str = ""
+    inbound_ids: tuple[int, ...] = ()
+    links: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ class NodeSnapshot:
 class X3UITarget:
     mode: str
     base_url: str
+    web_base_path: str
     username: str
     password: str
     inbound_id: int
@@ -46,6 +49,7 @@ class X3UITarget:
     public_port: int
     vless_query: str
     public_key: str = ""
+    sub_base_url: str = ""
 
 
 class X3UIError(RuntimeError):
@@ -59,109 +63,75 @@ X25519_A24 = 121665
 
 
 class X3UIClient:
-    def __init__(self, settings: Settings | None = None, node: VpnNode | None = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
-        self.target = self._target_from_node(node)
+        self.target = self._target_from_settings()
 
-    async def create_client(
+    async def create_subscription_client(
         self,
         *,
         email: str,
         telegram_id: int | None,
         expires_at: datetime | None,
         traffic_gb: int | None,
+        inbound_ids: Sequence[int],
+        sub_id: str | None = None,
     ) -> ProvisionedClient:
+        inbound_ids = tuple(dict.fromkeys(int(item) for item in inbound_ids if int(item) > 0))
+        if not inbound_ids:
+            raise X3UIError("No 3x-ui inbounds selected for client")
+
         client_uuid = str(uuid4())
+        sub_id = sub_id or client_uuid.replace("-", "")[:16]
 
         if self.target.mode == "mock":
             vless_uri = self.build_vless_uri(client_uuid=client_uuid, label=email)
-            return ProvisionedClient(client_uuid=client_uuid, email=email, vless_uri=vless_uri)
+            return ProvisionedClient(
+                client_uuid=client_uuid,
+                email=email,
+                vless_uri=vless_uri,
+                sub_id=sub_id,
+                inbound_ids=inbound_ids,
+                links=(vless_uri,),
+            )
 
         expiry_ms = int(expires_at.timestamp() * 1000) if expires_at else 0
         total_gb = int(Decimal(traffic_gb or 0) * Decimal(1024**3))
+        api_client = {
+            "email": email,
+            "id": client_uuid,
+            "uuid": client_uuid,
+            "subId": sub_id,
+            "flow": DEFAULT_REALITY_FLOW,
+            "totalGB": total_gb,
+            "expiryTime": expiry_ms,
+            "tgId": telegram_id or 0,
+            "limitIp": CLIENT_IP_LIMIT,
+            "enable": True,
+        }
 
         async with self._client() as client:
             await self._login(client)
-            inbound = await self._get_inbound(client, self.target.inbound_id)
-            flow = self._client_flow_for_inbound(inbound)
-            sub_id = client_uuid.replace("-", "")[:16]
-            client_settings = {
-                "id": client_uuid,
-                "email": email,
-                "enable": True,
-                "expiryTime": expiry_ms,
-                "totalGB": total_gb,
-                "tgId": str(telegram_id or ""),
-                "limitIp": CLIENT_IP_LIMIT,
-                "subId": sub_id,
-            }
-            api_client = {
-                "email": email,
-                "id": client_uuid,
-                "uuid": client_uuid,
-                "subId": sub_id,
-                "totalGB": total_gb,
-                "expiryTime": expiry_ms,
-                "tgId": telegram_id or 0,
-                "limitIp": CLIENT_IP_LIMIT,
-                "enable": True,
-            }
-            if flow:
-                client_settings["flow"] = flow
-                api_client["flow"] = flow
-
-            legacy_payload = {
-                "id": self.target.inbound_id,
-                "settings": json.dumps({"clients": [client_settings]}),
-            }
-
-            response = await client.post("/panel/api/inbounds/addClient", json=legacy_payload)
-            if response.status_code == 404:
-                response = await client.post(
-                    "/panel/api/clients/add",
-                    json={
-                        "client": api_client,
-                        "inboundIds": [self.target.inbound_id],
-                    },
-                )
+            response = await client.post(
+                self._panel_path("/panel/api/clients/add"),
+                json={
+                    "client": api_client,
+                    "inboundIds": list(inbound_ids),
+                },
+            )
             self._raise_for_x3ui(response)
 
-            inbound = await self._get_inbound(client, self.target.inbound_id)
-            created_client = self._find_inbound_client(inbound, email=email, client_uuid=client_uuid)
-            if created_client is None:
-                fetched_uuid = await self._client_uuid_by_email(client, email)
-                if fetched_uuid:
-                    client_uuid = fetched_uuid
-                    created_client = self._find_inbound_client(inbound, email=email, client_uuid=client_uuid)
+            links = tuple(await self._sub_links(client, sub_id=sub_id))
+            sub_url = await self._subscription_url(client, sub_id=sub_id)
 
-            if created_client is None:
-                raise X3UIError(
-                    f"3x-ui did not add client {email!r} to inbound {self.target.inbound_id}; key was not issued"
-                )
-
-            client_uuid = self._client_uuid_from_settings(created_client) or client_uuid
-            if self._inbound_security(inbound) == "reality":
-                vless_uri = await self._build_reality_vless_uri(
-                    client,
-                    inbound=inbound,
-                    client_settings=created_client,
-                    client_uuid=client_uuid,
-                    label=email,
-                )
-                self._validate_reality_vless_uri(
-                    vless_uri,
-                    inbound=inbound,
-                    client_settings=created_client,
-                    client_uuid=client_uuid,
-                )
-            else:
-                vless_uri = self.build_vless_uri_from_inbound(
-                    inbound=inbound,
-                    client_settings=created_client,
-                    client_uuid=client_uuid,
-                    label=email,
-                )
-        return ProvisionedClient(client_uuid=client_uuid, email=email, vless_uri=vless_uri)
+        return ProvisionedClient(
+            client_uuid=client_uuid,
+            email=email,
+            vless_uri=sub_url,
+            sub_id=sub_id,
+            inbound_ids=inbound_ids,
+            links=links,
+        )
 
     async def revoke_client(self, *, client_uuid: str, email: str | None = None) -> None:
         if self.target.mode == "mock":
@@ -171,15 +141,21 @@ class X3UIClient:
             await self._login(client)
             if email:
                 response = await client.post(
-                    f"/panel/api/clients/del/{quote(email, safe='')}",
+                    self._panel_path(f"/panel/api/clients/del/{quote(email, safe='')}"),
                     params={"keepTraffic": 0},
                 )
                 if response.status_code != 404:
+                    if self._is_client_not_found_response(response):
+                        return
                     self._raise_for_x3ui(response)
                     return
 
-            response = await client.post(f"/panel/api/inbounds/{self.target.inbound_id}/delClient/{client_uuid}")
+            response = await client.post(
+                self._panel_path(f"/panel/api/inbounds/{self.target.inbound_id}/delClient/{client_uuid}")
+            )
             if response.status_code != 404:
+                if self._is_client_not_found_response(response):
+                    return
                 self._raise_for_x3ui(response)
 
     async def collect_snapshot(self) -> NodeSnapshot:
@@ -200,9 +176,9 @@ class X3UIClient:
         try:
             async with self._client() as client:
                 await self._login(client)
-                status_response = await client.get("/panel/api/server/status")
+                status_response = await client.get(self._panel_path("/panel/api/server/status"))
                 self._raise_for_x3ui(status_response)
-                inbound_response = await client.get("/panel/api/inbounds/list")
+                inbound_response = await client.get(self._panel_path("/panel/api/inbounds/list"))
                 self._raise_for_x3ui(inbound_response)
                 latency_ms = int((time.monotonic() - started) * 1000)
                 status_data = self._payload_data(status_response)
@@ -221,6 +197,51 @@ class X3UIClient:
                 disk_percent=None,
                 error=str(exc)[:500],
             )
+
+    async def list_inbounds(self) -> list[dict[str, Any]]:
+        if self.target.mode == "mock":
+            return []
+        async with self._client() as client:
+            await self._login(client)
+            response = await client.get(self._panel_path("/panel/api/inbounds/list"))
+            self._raise_for_x3ui(response)
+            return self._inbound_list(self._payload_data(response))
+
+    async def list_nodes(self) -> list[dict[str, Any]]:
+        if self.target.mode == "mock":
+            return []
+        async with self._client() as client:
+            await self._login(client)
+            response = await client.get(self._panel_path("/panel/api/nodes/list"))
+            self._raise_for_x3ui(response)
+            payload = self._payload_data(response)
+            return [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+
+    async def collect_system_state(self) -> dict[str, Any]:
+        if self.target.mode == "mock":
+            return {"status": "online", "nodes": [], "inbounds": [], "error": None}
+
+        try:
+            async with self._client() as client:
+                await self._login(client)
+                status_response = await client.get(self._panel_path("/panel/api/server/status"))
+                self._raise_for_x3ui(status_response)
+                nodes_response = await client.get(self._panel_path("/panel/api/nodes/list"))
+                self._raise_for_x3ui(nodes_response)
+                inbounds_response = await client.get(self._panel_path("/panel/api/inbounds/list"))
+                self._raise_for_x3ui(inbounds_response)
+                nodes_payload = self._payload_data(nodes_response)
+                return {
+                    "status": "online",
+                    "server": self._payload_data(status_response),
+                    "nodes": [item for item in nodes_payload if isinstance(item, dict)]
+                    if isinstance(nodes_payload, list)
+                    else [],
+                    "inbounds": self._inbound_list(self._payload_data(inbounds_response)),
+                    "error": None,
+                }
+        except Exception as exc:
+            return {"status": "offline", "nodes": [], "inbounds": [], "error": str(exc)[:500]}
 
     def build_vless_uri(self, *, client_uuid: str, label: str) -> str:
         safe_label = label.replace(" ", "_")
@@ -280,7 +301,7 @@ class X3UIClient:
         return None
 
     async def _panel_vless_link(self, client: httpx.AsyncClient, *, email: str) -> str | None:
-        response = await client.get(f"/panel/api/clients/links/{quote(email, safe='')}")
+        response = await client.get(self._panel_path(f"/panel/api/clients/links/{quote(email, safe='')}"))
         if response.status_code == 404:
             return None
 
@@ -291,6 +312,66 @@ class X3UIClient:
             if isinstance(link, str) and link.startswith("vless://"):
                 return link
         return None
+
+    async def _sub_links(self, client: httpx.AsyncClient, *, sub_id: str) -> list[str]:
+        response = await client.get(self._panel_path(f"/panel/api/clients/subLinks/{quote(sub_id, safe='')}"))
+        if response.status_code == 404:
+            return []
+
+        self._raise_for_x3ui(response)
+        return self._string_list(self._payload_data(response))
+
+    async def _subscription_url(self, client: httpx.AsyncClient, *, sub_id: str) -> str:
+        configured = self.target.sub_base_url.strip()
+        if configured:
+            return self._join_subscription_base(configured, sub_id)
+
+        settings = await self._setting_all(client)
+        sub_path = self._string_value(settings.get("subPath")) or "/sub/"
+        sub_uri = self._string_value(settings.get("subURI"))
+        if sub_uri:
+            return self._join_subscription_base(self._subscription_base_with_path(sub_uri, sub_path), sub_id)
+
+        profile_url = self._string_value(settings.get("subProfileUrl"))
+        if profile_url:
+            return self._join_subscription_base(profile_url, sub_id)
+
+        sub_port = self._int_value(settings.get("subPort"))
+        parsed = urlsplit(self.target.base_url)
+        scheme = parsed.scheme or "https"
+        host = self.target.public_host.strip() or parsed.hostname or "127.0.0.1"
+        port = sub_port or parsed.port
+        netloc = host
+        if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+            netloc = f"{host}:{port}"
+        return self._join_subscription_base(f"{scheme}://{netloc}{sub_path}", sub_id)
+
+    async def _setting_all(self, client: httpx.AsyncClient) -> dict[str, Any]:
+        response = await client.post(self._panel_path("/panel/api/setting/all"))
+        if response.status_code == 404:
+            return {}
+
+        self._raise_for_x3ui(response)
+        payload = self._payload_data(response)
+        return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _join_subscription_base(base_url: str, sub_id: str) -> str:
+        base_url = base_url.strip()
+        if "{subId}" in base_url:
+            return base_url.replace("{subId}", quote(sub_id, safe=""))
+        if "{subid}" in base_url:
+            return base_url.replace("{subid}", quote(sub_id, safe=""))
+        if not base_url.endswith("/"):
+            base_url = f"{base_url}/"
+        return urljoin(base_url, quote(sub_id, safe=""))
+
+    @staticmethod
+    def _subscription_base_with_path(base_url: str, sub_path: str) -> str:
+        parsed = urlsplit(base_url)
+        if parsed.path and parsed.path != "/":
+            return base_url
+        return urljoin(f"{base_url.rstrip('/')}/", sub_path.strip("/") + "/")
 
     @classmethod
     def _string_list(cls, payload: Any) -> list[str]:
@@ -406,7 +487,7 @@ class X3UIClient:
             raise X3UIError("Broken Reality link: empty pbk")
 
     async def _get_inbound(self, client: httpx.AsyncClient, inbound_id: int) -> dict[str, Any]:
-        response = await client.get(f"/panel/api/inbounds/get/{inbound_id}")
+        response = await client.get(self._panel_path(f"/panel/api/inbounds/get/{inbound_id}"))
         if response.status_code != 404:
             self._raise_for_x3ui(response)
             payload = self._payload_data(response)
@@ -414,7 +495,7 @@ class X3UIClient:
                 return payload
             raise X3UIError(f"3x-ui inbound {inbound_id} response has unexpected shape")
 
-        response = await client.get("/panel/api/inbounds/list")
+        response = await client.get(self._panel_path("/panel/api/inbounds/list"))
         self._raise_for_x3ui(response)
         payload = self._payload_data(response)
         inbounds = self._inbound_list(payload)
@@ -728,7 +809,7 @@ class X3UIClient:
             client.headers["X-CSRF-Token"] = csrf_token
 
         response = await client.post(
-            "/login",
+            self._panel_path("/login"),
             data={
                 "username": self.target.username,
                 "password": self.target.password,
@@ -737,9 +818,8 @@ class X3UIClient:
         )
         self._raise_for_x3ui(response)
 
-    @staticmethod
-    async def _csrf_token(client: httpx.AsyncClient) -> str | None:
-        response = await client.get("/csrf-token", headers={"X-Requested-With": "XMLHttpRequest"})
+    async def _csrf_token(self, client: httpx.AsyncClient) -> str | None:
+        response = await client.get(self._panel_path("/csrf-token"), headers={"X-Requested-With": "XMLHttpRequest"})
         if response.status_code >= 400:
             return None
 
@@ -752,7 +832,7 @@ class X3UIClient:
         return token if isinstance(token, str) and token else None
 
     async def _client_uuid_by_email(self, client: httpx.AsyncClient, email: str) -> str | None:
-        response = await client.get(f"/panel/api/clients/get/{quote(email, safe='')}")
+        response = await client.get(self._panel_path(f"/panel/api/clients/get/{quote(email, safe='')}"))
         if response.status_code == 404:
             return None
 
@@ -765,30 +845,30 @@ class X3UIClient:
                 return uuid
         return None
 
-    def _target_from_node(self, node: VpnNode | None) -> X3UITarget:
-        if node is not None:
-            return X3UITarget(
-                mode=node.mode,
-                base_url=node.base_url,
-                username=node.username,
-                password=node.password,
-                inbound_id=node.inbound_id,
-                public_host=node.public_host,
-                public_port=node.public_port,
-                vless_query=node.vless_query,
-                public_key="",
-            )
+    def _panel_path(self, path: str) -> str:
+        base_path = self.target.web_base_path.strip()
+        path = f"/{path.lstrip('/')}"
+        if not base_path:
+            return path
 
+        base_path = f"/{base_path.strip('/')}"
+        if path == base_path or path.startswith(f"{base_path}/"):
+            return path
+        return f"{base_path}{path}"
+
+    def _target_from_settings(self) -> X3UITarget:
         return X3UITarget(
             mode=self.settings.x3ui_mode,
             base_url=self.settings.x3ui_base_url,
-            username=self.settings.x3ui_username,
-            password=self.settings.x3ui_password,
+            web_base_path=self.settings.x3ui_web_base_path,
+            username=self.settings.my_3x_ui_login.strip() or self.settings.x3ui_username,
+            password=self.settings.my_3x_ui_password.strip() or self.settings.x3ui_password,
             inbound_id=self.settings.x3ui_inbound_id,
             public_host=self.settings.vless_public_host,
             public_port=self.settings.vless_public_port,
             vless_query=self.settings.vless_query,
             public_key="",
+            sub_base_url=self.settings.x3ui_sub_base_url,
         )
 
     @staticmethod
@@ -803,6 +883,20 @@ class X3UIClient:
             data = response.json()
             if data.get("success") is False:
                 raise X3UIError(f"3x-ui API error: {data}")
+
+    @staticmethod
+    def _is_client_not_found_response(response: httpx.Response) -> bool:
+        content_type = response.headers.get("content-type", "")
+        if "application/json" not in content_type:
+            return False
+        try:
+            data = response.json()
+        except ValueError:
+            return False
+        if not isinstance(data, dict) or data.get("success") is not False:
+            return False
+        message = str(data.get("msg") or "").lower()
+        return "client" in message and "not found" in message
 
     @staticmethod
     def _payload_data(response: httpx.Response) -> Any:

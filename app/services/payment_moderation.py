@@ -167,13 +167,12 @@ async def revoke_user_access(session: AsyncSession, user_id: int) -> None:
     keys = (
         await session.scalars(
             select(VpnKey)
-            .options(selectinload(VpnKey.node))
             .where(VpnKey.user_id == user_id, VpnKey.key_type == "private", VpnKey.active.is_(True))
         )
     ).all()
     for key in keys:
         try:
-            await X3UIClient(node=key.node).revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+            await X3UIClient().revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
         except Exception:
             continue
         key.active = False
