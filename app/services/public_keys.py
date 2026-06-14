@@ -61,6 +61,7 @@ async def rotate_public_key(session: AsyncSession) -> VpnKey:
         expires_at=expires_at,
         traffic_gb=traffic_gb,
         inbound_ids=selection.inbound_ids,
+        limit_ip=settings.x3ui_public_limit_ip,
     )
     key = VpnKey(
         node_id=None,
@@ -68,6 +69,10 @@ async def rotate_public_key(session: AsyncSession) -> VpnKey:
         subscription_id=None,
         key_type="public",
         x3ui_client_uuid=client.client_uuid,
+        x3ui_sub_id=client.sub_id,
+        x3ui_inbound_ids=list(client.inbound_ids),
+        server_label=selection.title,
+        limit_ip=settings.x3ui_public_limit_ip,
         email=client.email,
         vless_uri=client.vless_uri,
         active=True,

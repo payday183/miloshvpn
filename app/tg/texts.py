@@ -1,4 +1,5 @@
 from html import escape
+from math import ceil
 from decimal import Decimal
 
 from app.config import get_settings
@@ -6,13 +7,14 @@ from app.models import Order, Plan, Subscription, User, VpnKey
 from app.services.manual_orders import ManualOrderGrantResult
 from app.services.payment_modes import payment_provider_label
 from app.services.vpn import TRIAL_PLAN_CODE
+from app.timeutils import utcnow
 
 
 def start_text(user: User, is_admin: bool, trial_created: bool = False, trial_failed: bool = False) -> str:
     if trial_failed:
         trial_line = "Trial-ключ не выдался автоматически. Загляни в поддержку, поможем без паники."
     elif trial_created:
-        trial_line = "Подарок на входе: 3-дневный ключ уже в твоём Профиле."
+        trial_line = "Подарок на входе: 7-дневный ключ уже в твоём Профиле."
     else:
         trial_line = "Ключ, подписка и сроки лежат в Профиле."
     admin_line = "\n\n🛠 Админка тоже рядом, отдельной кнопкой." if is_admin else ""
@@ -25,7 +27,15 @@ def start_text(user: User, is_admin: bool, trial_created: bool = False, trial_fa
     )
 
 
-def profile_text(user: User, subscription: Subscription | None, key: VpnKey | None, plan: Plan | None = None) -> str:
+def profile_text(
+    user: User,
+    subscription: Subscription | None,
+    key: VpnKey | None,
+    plan: Plan | None = None,
+    *,
+    referral_url: str = "",
+    referral_count: int = 0,
+) -> str:
     username = f"@{escape(user.username)}" if user.username else "не указан"
     lines = [
         "👤 Профиль\n\n"
@@ -37,24 +47,65 @@ def profile_text(user: User, subscription: Subscription | None, key: VpnKey | No
         lines.append("\nTrial выдаётся один раз при старте бота. Если он не появился, напиши в поддержку.")
         return "".join(lines)
 
-    title = plan.title if plan is not None else subscription.plan_code
-    if subscription.plan_code == TRIAL_PLAN_CODE:
-        title = "Бесплатный 3-дневный ключ"
+    title = subscription_title(subscription, plan)
     traffic = "без лимита" if subscription.traffic_limit_gb is None else f"{subscription.traffic_limit_gb} ГБ"
     lines.append(
-        "\n\n💎 Моя подписка\n"
-        f"\nТариф: <b>{escape(title)}</b>\n"
+        f"\n\n💎 Моя подписка: <b>{escape(title)}</b>\n"
+    )
+    if referral_url:
+        safe_referral_url = escape(referral_url)
+        lines.append(
+            "\nРеферальная ссылка: посоветуй другу — получи +3 дня\n"
+            f"<code>{safe_referral_url}</code>\n"
+            "\n"
+            f"Число рефералов: <b>{referral_count}</b>\n"
+        )
+
+    lines.append(
         f"\nСтарт: {subscription.starts_at:%d.%m.%Y %H:%M UTC}\n"
-        f"\nФиниш: {subscription.expires_at:%d.%m.%Y %H:%M UTC}\n"
+        f"Финиш: {subscription.expires_at:%d.%m.%Y %H:%M UTC}\n"
         "\n"
         f"Лимит: {traffic}"
     )
 
     if key is not None:
+        server = escape(key.server_label or "системная 3x-ui")
+        lines.append(f"\n\nОсталось: {remaining_days_text(subscription)}")
+        lines.append(f"\n\n🌍 Сервер: {server}")
         lines.append(f"\n\n🔑 Мой sub:\n<code>{escape(key.vless_uri)}</code>")
     else:
         lines.append("\n\n🔑 Ключ пока не выдан. Открой /start или напиши в поддержку.")
     return "".join(lines)
+
+
+def channel_gate_text() -> str:
+    return (
+        "Перед профилем подпишись на канал MiloshVPN.\n\n"
+        "В канале публикуем новости по серверам, обновления тарифов, полезные подсказки по подключению "
+        "и бесплатные ключи для подписчиков.\n\n"
+        "После подписки нажми <b>Я подписался</b> — покажу твой профиль и подарок: "
+        "VPN-ключ на 7 дней с лимитом 500 ГБ бесплатно."
+    )
+
+
+def subscription_title(subscription: Subscription, plan: Plan | None = None) -> str:
+    if subscription.plan_code == TRIAL_PLAN_CODE:
+        return "Триал"
+    return plan.title if plan is not None else subscription.plan_code
+
+
+def remaining_days_text(subscription: Subscription) -> str:
+    seconds_left = max(0, (subscription.expires_at - utcnow()).total_seconds())
+    days_left = ceil(seconds_left / 86400) if seconds_left > 0 else 0
+    return f"{days_left} {days_word(days_left)}"
+
+
+def days_word(value: int) -> str:
+    if value % 10 == 1 and value % 100 != 11:
+        return "день"
+    if value % 10 in {2, 3, 4} and value % 100 not in {12, 13, 14}:
+        return "дня"
+    return "дней"
 
 
 def plans_text(plans: list[Plan]) -> str:
@@ -266,16 +317,17 @@ def subscription_text(subscription: Subscription | None, key: VpnKey | None) -> 
         return "Подписки пока нет. Жми <b>Купить</b>, выберем тебе хороший вход."
 
     traffic = "без лимита" if subscription.traffic_limit_gb is None else f"{subscription.traffic_limit_gb} ГБ"
-    title = "Бесплатный 3-дневный ключ" if subscription.plan_code == TRIAL_PLAN_CODE else subscription.plan_code
+    title = subscription_title(subscription)
     text = (
-        "💎 Моя подписка\n\n"
-        f"Тариф: {title}\n"
-        f"\nСтарт: {subscription.starts_at:%d.%m.%Y %H:%M UTC}\n"
-        f"\nФиниш: {subscription.expires_at:%d.%m.%Y %H:%M UTC}\n"
+        f"💎 Моя подписка: {title}\n\n"
+        f"Старт: {subscription.starts_at:%d.%m.%Y %H:%M UTC}\n"
+        f"Финиш: {subscription.expires_at:%d.%m.%Y %H:%M UTC}\n"
         "\n"
         f"Лимит: {traffic}"
     )
     if key is not None:
+        text += f"\n\nОсталось: {remaining_days_text(subscription)}"
+        text += f"\n\n🌍 Сервер: {escape(key.server_label or 'системная 3x-ui')}"
         text += f"\n\n🔑 Sub-ссылка:\n<code>{escape(key.vless_uri)}</code>"
     else:
         text += "\n\nКлюч ещё не выдан. Напиши в поддержку, разберёмся."
@@ -379,7 +431,7 @@ def policy_text() -> str:
     return (
         "🛡 Политика проекта\n\n"
         "1. Один ключ — один владелец и один нормальный сценарий использования.\n"
-        "2. Trial даётся один раз на 3 дня и имеет лимит трафика.\n"
+        "2. Trial даётся один раз на 7 дней и имеет лимит трафика.\n"
         "3. Торренты, Tor, спам, сканирование и жёсткая нагрузка запрещены.\n"
         "4. Оплата засчитывается только с правильной суммой и персональным кодом.\n"
         "5. Мы не продаём интернет как товар: суммы — это поддержка проекта, чтобы серверы работали стабильно.\n"

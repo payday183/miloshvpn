@@ -12,6 +12,7 @@ from app.services.payment_notifications import notify_paid_orders
 from app.services.payment_moderation import expire_unconfirmed_orders
 from app.services.public_keys import (
     expire_public_keys,
+    get_active_public_key,
     mark_public_key_posted,
     normalize_public_key_chat_id,
     public_key_channel_post_text,
@@ -77,7 +78,7 @@ async def public_key_loop() -> None:
                         if bot is None:
                             logger.warning("Skipping public key post because Telegram target is not configured")
                         else:
-                            key = await rotate_public_key(session)
+                            key = await get_active_public_key(session) or await rotate_public_key(session)
                             text = await public_key_channel_post_text(session, key)
                             await bot.send_message(chat_id, text, parse_mode="HTML")
                             await mark_public_key_posted(session)

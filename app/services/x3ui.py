@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 import json
+import secrets
 import time
 from typing import Any, Sequence
 from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
@@ -58,6 +59,7 @@ class X3UIError(RuntimeError):
 
 CLIENT_IP_LIMIT = 1
 DEFAULT_REALITY_FLOW = "xtls-rprx-vision"
+HYSTERIA_SECRET_BYTES = 8
 X25519_FIELD_SIZE = 2**255 - 19
 X25519_A24 = 121665
 
@@ -75,6 +77,7 @@ class X3UIClient:
         expires_at: datetime | None,
         traffic_gb: int | None,
         inbound_ids: Sequence[int],
+        limit_ip: int | None = None,
         sub_id: str | None = None,
     ) -> ProvisionedClient:
         inbound_ids = tuple(dict.fromkeys(int(item) for item in inbound_ids if int(item) > 0))
@@ -97,17 +100,24 @@ class X3UIClient:
 
         expiry_ms = int(expires_at.timestamp() * 1000) if expires_at else 0
         total_gb = int(Decimal(traffic_gb or 0) * Decimal(1024**3))
+        limit_ip = max(0, int(CLIENT_IP_LIMIT if limit_ip is None else limit_ip))
+        hysteria_auth = secrets.token_hex(HYSTERIA_SECRET_BYTES)
+        hysteria_password = secrets.token_hex(HYSTERIA_SECRET_BYTES)
         api_client = {
             "email": email,
             "id": client_uuid,
             "uuid": client_uuid,
             "subId": sub_id,
             "flow": DEFAULT_REALITY_FLOW,
+            "auth": hysteria_auth,
+            "password": hysteria_password,
+            "security": "auto",
             "totalGB": total_gb,
             "expiryTime": expiry_ms,
             "tgId": telegram_id or 0,
-            "limitIp": CLIENT_IP_LIMIT,
+            "limitIp": limit_ip,
             "enable": True,
+            "reset": 0,
         }
 
         async with self._client() as client:
@@ -157,6 +167,56 @@ class X3UIClient:
                 if self._is_client_not_found_response(response):
                     return
                 self._raise_for_x3ui(response)
+
+    async def update_client_expiry(
+        self,
+        *,
+        client_uuid: str,
+        email: str | None,
+        expires_at: datetime,
+        inbound_ids: Sequence[int] | None = None,
+    ) -> None:
+        if self.target.mode == "mock":
+            return
+
+        expiry_ms = int(expires_at.timestamp() * 1000)
+        wanted_inbound_ids = {int(item) for item in (inbound_ids or []) if int(item) > 0}
+
+        async with self._client() as client:
+            await self._login(client)
+            response = await client.get(self._panel_path("/panel/api/inbounds/list"))
+            self._raise_for_x3ui(response)
+            inbounds = self._inbound_list(self._payload_data(response))
+
+            updated = 0
+            for inbound in inbounds:
+                inbound_id = self._int_value(inbound.get("id"))
+                if inbound_id <= 0:
+                    continue
+                if wanted_inbound_ids and inbound_id not in wanted_inbound_ids:
+                    continue
+
+                client_settings = self._find_inbound_client(
+                    inbound,
+                    email=email or "",
+                    client_uuid=client_uuid,
+                )
+                if client_settings is None:
+                    continue
+
+                updated_settings = dict(client_settings)
+                updated_settings["id"] = self._string_value(updated_settings.get("id")) or client_uuid
+                updated_settings["uuid"] = self._string_value(updated_settings.get("uuid")) or client_uuid
+                if email:
+                    updated_settings["email"] = self._string_value(updated_settings.get("email")) or email
+                updated_settings["expiryTime"] = expiry_ms
+
+                await self._update_inbound_client(client, inbound_id, client_uuid, updated_settings)
+                updated += 1
+
+            if updated == 0:
+                identifier = email or client_uuid
+                raise X3UIError(f"3x-ui client was not found for expiry update: {identifier}")
 
     async def collect_snapshot(self) -> NodeSnapshot:
         if self.target.mode == "mock":
@@ -383,6 +443,23 @@ class X3UIClient:
                 if isinstance(value, list):
                     return [item for item in value if isinstance(item, str) and item]
         return []
+
+    async def _update_inbound_client(
+        self,
+        client: httpx.AsyncClient,
+        inbound_id: int,
+        client_uuid: str,
+        client_settings: dict[str, Any],
+    ) -> None:
+        payload = {
+            "id": inbound_id,
+            "settings": json.dumps({"clients": [client_settings]}, ensure_ascii=False),
+        }
+        response = await client.post(
+            self._panel_path(f"/panel/api/inbounds/updateClient/{quote(client_uuid, safe='')}"),
+            json=payload,
+        )
+        self._raise_for_x3ui(response)
 
     def _reality_public_key(self, inbound: dict[str, Any]) -> str:
         stream_settings = self._json_value(inbound.get("streamSettings"))

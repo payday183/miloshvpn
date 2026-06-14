@@ -22,6 +22,7 @@ async def create_admin_key(session: AsyncSession, user: User) -> VpnKey:
         expires_at=None,
         traffic_gb=None,
         inbound_ids=selection.inbound_ids,
+        limit_ip=settings.x3ui_admin_limit_ip,
     )
     key = VpnKey(
         node_id=None,
@@ -29,6 +30,10 @@ async def create_admin_key(session: AsyncSession, user: User) -> VpnKey:
         subscription_id=None,
         key_type="admin",
         x3ui_client_uuid=client.client_uuid,
+        x3ui_sub_id=client.sub_id,
+        x3ui_inbound_ids=list(client.inbound_ids),
+        server_label=selection.title,
+        limit_ip=settings.x3ui_admin_limit_ip,
         email=client.email,
         vless_uri=client.vless_uri,
         active=True,
@@ -52,6 +57,7 @@ async def create_admin_reality_key(session: AsyncSession, user: User) -> VpnKey:
         expires_at=None,
         traffic_gb=None,
         inbound_ids=selection.inbound_ids,
+        limit_ip=settings.x3ui_admin_limit_ip,
     )
     key = VpnKey(
         node_id=None,
@@ -59,6 +65,10 @@ async def create_admin_reality_key(session: AsyncSession, user: User) -> VpnKey:
         subscription_id=None,
         key_type="admin",
         x3ui_client_uuid=client.client_uuid,
+        x3ui_sub_id=client.sub_id,
+        x3ui_inbound_ids=list(client.inbound_ids),
+        server_label=selection.title,
+        limit_ip=settings.x3ui_admin_limit_ip,
         email=client.email,
         vless_uri=client.vless_uri,
         active=True,

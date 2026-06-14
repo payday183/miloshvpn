@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     x3ui_user_inbound_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
     x3ui_admin_inbound_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
     x3ui_public_inbound_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
+    x3ui_user_limit_ip: int = 2
+    x3ui_admin_limit_ip: int = 1
+    x3ui_public_limit_ip: int = 0
     node_selection_mode: Literal["active", "least_loaded"] = "least_loaded"
     node_overload_cpu_percent: int = 85
     node_overload_memory_percent: int = 90
@@ -63,11 +66,11 @@ class Settings(BaseSettings):
     public_key_post_hour_msk: int = 14
     public_key_chat_id: str = ""
     free_trial_enabled: bool = True
-    free_trial_days: int = 3
-    free_trial_traffic_gb: int = 10
+    free_trial_days: int = 7
+    free_trial_traffic_gb: int = 500
     node_status_poll_interval_seconds: int = 3600
     expired_subscription_cleanup_enabled: bool = True
-    expired_subscription_cleanup_interval_seconds: int = 300
+    expired_subscription_cleanup_interval_seconds: int = 86400
 
     @field_validator(
         "admin_ids",

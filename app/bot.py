@@ -5,14 +5,14 @@ import re
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
 from aiogram.filters import BaseFilter, Command, CommandStart
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.db import SessionLocal, init_db
-from app.models import Order, Plan
+from app.models import Order, Plan, Subscription, User, VpnKey
 from app.services.admin_auth import build_admin_profile_url
 from app.services.admin_key_notifications import send_admin_reality_key
 from app.services.admin_keys import create_admin_key, create_admin_reality_keys_for_admins
@@ -43,6 +43,7 @@ from app.services.public_keys import (
     public_key_post_text,
     rotate_public_key,
 )
+from app.services.referrals import capture_start_referral, credit_pending_referral, referral_profile_for_user
 from app.services.seed import ADMIN_TEST_PLAN_CODE
 from app.services.stats import collect_stats
 from app.services.users import add_admin, get_or_create_user, is_admin
@@ -68,6 +69,7 @@ from app.tg.texts import (
     admin_review_orders_txt,
     admin_review_queue_item_text,
     admin_review_request_text,
+    channel_gate_text,
     hybrid_payment_text,
     instruction_text,
     manual_sbp_payment_text,
@@ -94,6 +96,7 @@ PENDING_QR_UPLOADS: dict[int, int] = {}
 PENDING_FAST_REVIEW_UPLOADS: set[int] = set()
 REVIEW_QUEUE_STATE: dict[int, list[int]] = {}
 REVIEW_QUEUE_TOTALS: dict[int, int] = {}
+BOT_USERNAME_CACHE = ""
 
 
 class PendingFastReviewFilter(BaseFilter):
@@ -107,6 +110,53 @@ def visible_purchase_plans(plans: list[Plan], admin: bool) -> list[Plan]:
     return [plan for plan in plans if plan.code != ADMIN_TEST_PLAN_CODE]
 
 
+def command_start_payload(message: Message) -> str:
+    parts = (message.text or "").strip().split(maxsplit=1)
+    return parts[1].strip() if len(parts) == 2 else ""
+
+
+async def referral_bot_username(bot: Bot) -> str:
+    global BOT_USERNAME_CACHE
+
+    configured = get_settings().bot_username.strip().lstrip("@")
+    if configured:
+        return configured
+    if BOT_USERNAME_CACHE:
+        return BOT_USERNAME_CACHE
+
+    me = await bot.get_me()
+    BOT_USERNAME_CACHE = (me.username or "").strip().lstrip("@")
+    return BOT_USERNAME_CACHE
+
+
+def public_channel_url() -> str:
+    settings = get_settings()
+    chat_id = normalize_public_key_chat_id(settings.public_key_chat_id)
+    if chat_id.startswith("@"):
+        return f"https://t.me/{chat_id[1:]}"
+    if chat_id.startswith(("http://", "https://")):
+        return chat_id
+    return ""
+
+
+def should_show_channel_gate(user: User, admin: bool) -> bool:
+    return not admin and bool(user.channel_gate_required) and user.channel_gate_completed_at is None
+
+
+def profile_reply_markup(
+    user: User,
+    admin: bool,
+    subscription_obj: Subscription | None,
+    key: VpnKey | None,
+) -> InlineKeyboardMarkup | ReplyKeyboardMarkup:
+    if subscription_obj is not None and key is not None:
+        return kb.profile_actions_keyboard(
+            admin_url=build_admin_profile_url(user.telegram_id) if admin else None,
+            include_replace=True,
+        )
+    return kb.admin_profile_keyboard(build_admin_profile_url(user.telegram_id)) if admin else kb.main_keyboard(admin)
+
+
 async def current_user(message: Message):
     async with SessionLocal() as session:
         user = await get_or_create_user(
@@ -117,6 +167,28 @@ async def current_user(message: Message):
         )
         await session.commit()
         admin = await is_admin(session, user.telegram_id)
+        return user, admin
+
+
+async def current_user_for_start(message: Message):
+    async with SessionLocal() as session:
+        existing_user = await session.scalar(select(User).where(User.telegram_id == message.from_user.id))
+        user = await get_or_create_user(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
+        admin = await is_admin(session, user.telegram_id)
+        if existing_user is None and not admin:
+            user.channel_gate_required = True
+            user.channel_gate_completed_at = None
+            await capture_start_referral(
+                session,
+                referred_user=user,
+                start_payload=command_start_payload(message),
+            )
+        await session.commit()
         return user, admin
 
 
@@ -140,7 +212,7 @@ async def grant_trial_for_start(message: Message) -> bool | None:
 
 @router.message(CommandStart())
 async def start(message: Message) -> None:
-    user, admin = await current_user(message)
+    user, admin = await current_user_for_start(message)
     trial_result = await grant_trial_for_start(message)
     await message.answer(
         start_text(user, admin, trial_created=trial_result is True, trial_failed=trial_result is None),
@@ -150,36 +222,113 @@ async def start(message: Message) -> None:
 
 
 @router.message(F.text == kb.PROFILE)
-async def profile(message: Message) -> None:
+async def profile(message: Message, bot: Bot) -> None:
     user, admin = await current_user(message)
+    if should_show_channel_gate(user, admin):
+        await message.answer(
+            channel_gate_text(),
+            reply_markup=kb.channel_gate_keyboard(public_channel_url()),
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
     async with SessionLocal() as session:
         subscription_obj = await get_active_subscription(session, user.id)
         plan = await session.get(Plan, subscription_obj.plan_code) if subscription_obj is not None else None
         key = await get_active_key(session, user.id)
-    if subscription_obj is not None and key is not None:
-        reply_markup = kb.profile_actions_keyboard(
-            admin_url=build_admin_profile_url(user.telegram_id) if admin else None,
-            include_replace=True,
+        referral = await referral_profile_for_user(session, user, bot_username=await referral_bot_username(bot))
+    reply_markup = profile_reply_markup(user, admin, subscription_obj, key)
+    await message.answer(
+        profile_text(
+            user,
+            subscription_obj,
+            key,
+            plan,
+            referral_url=referral.url,
+            referral_count=referral.credited_count,
+        ),
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.callback_query(F.data == kb.CHANNEL_GATE_SUBSCRIBED)
+async def channel_gate_subscribed(callback: CallbackQuery, bot: Bot) -> None:
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
         )
-    else:
-        reply_markup = kb.admin_profile_keyboard(build_admin_profile_url(user.telegram_id)) if admin else kb.main_keyboard(admin)
-    await message.answer(profile_text(user, subscription_obj, key, plan), reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        admin = await is_admin(session, user.telegram_id)
+        if not admin:
+            user.channel_gate_required = False
+            user.channel_gate_completed_at = user.channel_gate_completed_at or utcnow()
+        await session.commit()
+
+    if not admin:
+        async with SessionLocal() as session:
+            referred_user = await session.scalar(select(User).where(User.telegram_id == callback.from_user.id))
+            if referred_user is not None:
+                try:
+                    await credit_pending_referral(session, referred_user=referred_user)
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    logging.exception("Failed to credit referral for telegram_id=%s", callback.from_user.id)
+
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        admin = await is_admin(session, user.telegram_id)
+        subscription_obj = await get_active_subscription(session, user.id)
+        plan = await session.get(Plan, subscription_obj.plan_code) if subscription_obj is not None else None
+        key = await get_active_key(session, user.id)
+        referral = await referral_profile_for_user(session, user, bot_username=await referral_bot_username(bot))
+
+    reply_markup = profile_reply_markup(user, admin, subscription_obj, key)
+    await callback.message.answer(
+        profile_text(
+            user,
+            subscription_obj,
+            key,
+            plan,
+            referral_url=referral.url,
+            referral_count=referral.credited_count,
+        ),
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.HTML,
+    )
+    await callback.answer("Готово")
 
 
 @router.message((F.text == kb.SUBSCRIPTION) | (F.text == kb.FREE_KEY))
-async def subscription(message: Message) -> None:
+async def subscription(message: Message, bot: Bot) -> None:
     user, admin = await current_user(message)
     async with SessionLocal() as session:
         subscription_obj = await get_active_subscription(session, user.id)
         plan = await session.get(Plan, subscription_obj.plan_code) if subscription_obj is not None else None
         key = await get_active_key(session, user.id)
+        referral = await referral_profile_for_user(session, user, bot_username=await referral_bot_username(bot))
     reply_markup = (
         kb.profile_actions_keyboard(include_replace=True)
         if subscription_obj is not None and key is not None
         else kb.main_keyboard(admin)
     )
     await message.answer(
-        profile_text(user, subscription_obj, key, plan),
+        profile_text(
+            user,
+            subscription_obj,
+            key,
+            plan,
+            referral_url=referral.url,
+            referral_count=referral.credited_count,
+        ),
         reply_markup=reply_markup,
         parse_mode=ParseMode.HTML,
     )

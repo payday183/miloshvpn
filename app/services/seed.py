@@ -178,7 +178,7 @@ async def seed_defaults(session: AsyncSession) -> None:
 
     trial_payload = {
         "code": TRIAL_PLAN_CODE,
-        "title": "Бесплатный 3-дневный ключ",
+        "title": "Бесплатный 7-дневный ключ",
         "description": "Автоматический trial-доступ после старта бота.",
         "price_rub": Decimal("0.00"),
         "days": settings.free_trial_days,

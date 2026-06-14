@@ -105,6 +105,7 @@ async def create_private_key(session: AsyncSession, user: User, subscription: Su
         expires_at=subscription.expires_at,
         traffic_gb=subscription.traffic_limit_gb,
         inbound_ids=selection.inbound_ids,
+        limit_ip=settings.x3ui_user_limit_ip,
     )
     key = VpnKey(
         node_id=None,
@@ -112,6 +113,10 @@ async def create_private_key(session: AsyncSession, user: User, subscription: Su
         subscription_id=subscription.id,
         key_type="private",
         x3ui_client_uuid=client.client_uuid,
+        x3ui_sub_id=client.sub_id,
+        x3ui_inbound_ids=list(client.inbound_ids),
+        server_label=selection.title,
+        limit_ip=settings.x3ui_user_limit_ip,
         email=client.email,
         vless_uri=client.vless_uri,
         active=True,
@@ -128,6 +133,48 @@ async def replace_active_private_key(session: AsyncSession, user: User) -> VpnKe
     if subscription is None:
         raise RuntimeError("No active subscription for key replacement")
     return await create_private_key(session, user, subscription)
+
+
+async def extend_active_subscription_days(session: AsyncSession, user_id: int, days: int) -> Subscription | None:
+    now = utcnow()
+    subscription = await session.scalar(
+        select(Subscription)
+        .where(
+            Subscription.user_id == user_id,
+            Subscription.status == "active",
+            Subscription.expires_at > now,
+        )
+        .order_by(Subscription.expires_at.desc())
+        .with_for_update()
+    )
+    if subscription is None:
+        return None
+
+    reward_days = max(1, int(days))
+    subscription.expires_at = max(subscription.expires_at, now) + timedelta(days=reward_days)
+
+    keys = (
+        await session.scalars(
+            select(VpnKey)
+            .where(
+                VpnKey.subscription_id == subscription.id,
+                VpnKey.key_type == "private",
+                VpnKey.active.is_(True),
+            )
+            .with_for_update()
+        )
+    ).all()
+    for key in keys:
+        await X3UIClient().update_client_expiry(
+            client_uuid=key.x3ui_client_uuid,
+            email=key.email,
+            expires_at=subscription.expires_at,
+            inbound_ids=key.x3ui_inbound_ids or None,
+        )
+        key.expires_at = subscription.expires_at
+
+    await session.flush()
+    return subscription
 
 
 async def ensure_trial_subscription(session: AsyncSession, user: User) -> tuple[Subscription | None, VpnKey | None, bool]:

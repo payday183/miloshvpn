@@ -1,19 +1,26 @@
 MiloshVPN system 3x-ui inventory
-Generated UTC: 2026-06-13 11:37:22 UTC
+Generated UTC: 2026-06-13 15:50:23 UTC
 Panel status: online
 
-Nodes (0):
-- none; remote nodes are not connected yet
+Nodes (1):
+- nodeId=2; name=FR; status=online; enabled=True
 
-Inbounds (6):
+Inbounds (11):
 - id=2; remark=nl  MiloshVPN Vless; port=59911; protocol=vless; network=tcp; security=reality; enabled=True; clients=4; system/local (nodeId=None)
 - id=3; remark=nl  MiloshVPN XHTTP; port=13241; protocol=vless; network=xhttp; security=reality; enabled=True; clients=4; system/local (nodeId=None)
 - id=4; remark=nl  MiloshVPN Hysteria; port=57280; protocol=hysteria; network=hysteria; security=tls; enabled=True; clients=4; system/local (nodeId=None)
 - id=6; remark=nl  MiloshVPN VlessFul1; port=22986; protocol=vless; network=tcp; security=reality; enabled=True; clients=2; system/local (nodeId=None)
 - id=7; remark=nl  MiloshVPN VlessFul2; port=41837; protocol=vless; network=tcp; security=reality; enabled=True; clients=2; system/local (nodeId=None)
 - id=10; remark=nl  MiloshVPN VlessFul5(none); port=13163; protocol=vless; network=tcp; security=none; enabled=True; clients=2; system/local (nodeId=None)
+- id=11; remark=🇫🇷 MiloshVPN franch Vless Xhttp; port=59051; protocol=vless; network=xhttp; security=reality; enabled=True; clients=9; remote nodeId=2 (FR)
+- id=12; remark=🇫🇷 MiloshVPN franch Vless Hysteria; port=39462; protocol=vless; network=tcp; security=tls; enabled=True; clients=8; remote nodeId=2 (FR)
+- id=13; remark=🇫🇷 MiloshVPN franch Vless ; port=41506; protocol=vless; network=tcp; security=reality; enabled=True; clients=8; remote nodeId=2 (FR)
+- id=14; remark=🇫🇷 MiloshVPN franch VlessFul1; port=23066; protocol=vless; network=tcp; security=reality; enabled=True; clients=8; remote nodeId=2 (FR)
+- id=16; remark=🇫🇷 MiloshVPN franch VlessFul3; port=53916; protocol=vless; network=tcp; security=reality; enabled=True; clients=8; remote nodeId=2 (FR)
 
 Selection rules observed:
 - admin: uses system/local inbounds without nodeId; selected ids 2, 3, 4, 6, 7, 10.
 - admin_reality: uses configured Reality inbound; selected id 2.
-- user/public: waits for remote node inbounds with nodeId; currently unavailable because no nodes are connected.
+- user/trial/paid/public: uses enabled remote node inbounds; current selected node is FR with ids 11, 12, 13, 14, 16.
+- public clients are created with limitIp=0.
+- user/trial clients are created with limitIp=2, 7 days and 500 GB for trial.

@@ -17,10 +17,24 @@ class User(Base):
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     role: Mapped[str] = mapped_column(String(32), default="user", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    channel_gate_required: Mapped[bool] = mapped_column(Boolean, default=False)
+    channel_gate_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="user")
     orders: Mapped[list["Order"]] = relationship(back_populates="user")
     keys: Mapped[list["VpnKey"]] = relationship(back_populates="user")
+
+
+class Referral(Base):
+    __tablename__ = "referrals"
+    __table_args__ = (UniqueConstraint("referred_user_id", name="uq_referrals_referred_user_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    referrer_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    referred_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    reward_days: Mapped[int] = mapped_column(Integer, default=3)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    credited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class Plan(Base):
@@ -116,6 +130,10 @@ class VpnKey(Base):
     subscription_id: Mapped[int | None] = mapped_column(ForeignKey("subscriptions.id"), nullable=True, index=True)
     key_type: Mapped[str] = mapped_column(String(32), default="private", index=True)
     x3ui_client_uuid: Mapped[str] = mapped_column(String(64), unique=True)
+    x3ui_sub_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    x3ui_inbound_ids: Mapped[list[int] | None] = mapped_column(JSON, nullable=True)
+    server_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    limit_ip: Mapped[int | None] = mapped_column(Integer, nullable=True)
     email: Mapped[str] = mapped_column(String(255), index=True)
     vless_uri: Mapped[str] = mapped_column(Text)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)

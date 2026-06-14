@@ -22,6 +22,8 @@ ADMIN_CREATE_KEY = "Создать admin key"
 ADMIN_KEYS = "Личные ключи"
 ADMIN_MAIN_MENU = "Главное меню"
 
+CHANNEL_GATE_SUBSCRIBED = "channel_gate_subscribed"
+
 
 def main_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
     keyboard = [
@@ -117,3 +119,11 @@ def profile_actions_keyboard(*, admin_url: str | None = None, include_replace: b
 
 def admin_profile_keyboard(url: str) -> InlineKeyboardMarkup:
     return profile_actions_keyboard(admin_url=url)
+
+
+def channel_gate_keyboard(channel_url: str) -> InlineKeyboardMarkup:
+    keyboard: list[list[InlineKeyboardButton]] = []
+    if channel_url:
+        keyboard.append([InlineKeyboardButton(text="Канал", url=channel_url)])
+    keyboard.append([InlineKeyboardButton(text="Я подписался", callback_data=CHANNEL_GATE_SUBSCRIBED)])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
