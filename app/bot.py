@@ -17,6 +17,12 @@ from app.services.admin_auth import build_admin_profile_url
 from app.services.admin_key_notifications import send_admin_reality_key
 from app.services.admin_keys import create_admin_key, create_admin_reality_keys_for_admins
 from app.services.billing import create_order, poll_donations
+from app.services.direct_node_admin import (
+    render_admin_direct_node_audit,
+    render_admin_direct_node_provision,
+    run_admin_direct_node_audit,
+    run_admin_direct_node_create,
+)
 from app.services.manual_orders import ManualOrderError, manually_confirm_order, search_orders_for_admin
 from app.services.payment_modes import (
     PAYMENT_PROVIDER_DONATIONALERTS,
@@ -990,6 +996,62 @@ async def create_admin_reality_key_command(message: Message) -> None:
     await message.answer(
         f"Создал Reality test keys для админов: <b>{len(created)}</b>\n"
         f"Отправлено в личку: <b>{sent}</b>{failed_text}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb.admin_keyboard(),
+    )
+
+
+@router.message(Command("admin_direct_node_audit"))
+@router.message(F.text == kb.ADMIN_DIRECT_NODE_AUDIT)
+async def admin_direct_node_audit_command(message: Message) -> None:
+    _, admin = await current_user(message)
+    if not admin:
+        return
+
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
+        result = await run_admin_direct_node_audit(session, user)
+
+    await message.answer(
+        render_admin_direct_node_audit(result),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb.admin_keyboard(),
+    )
+
+
+@router.message(Command("admin_direct_node_create"))
+@router.message(F.text == kb.ADMIN_DIRECT_NODE_CREATE)
+async def admin_direct_node_create_command(message: Message) -> None:
+    _, admin = await current_user(message)
+    if not admin:
+        return
+
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
+        try:
+            result = await run_admin_direct_node_create(session, user)
+        except RuntimeError as exc:
+            await session.rollback()
+            await message.answer(str(exc), reply_markup=kb.admin_keyboard())
+            return
+        except Exception:
+            await session.rollback()
+            logging.exception("Admin direct-node create failed")
+            await message.answer("Direct-node create не прошёл. Подробности в логах.", reply_markup=kb.admin_keyboard())
+            return
+
+    await message.answer(
+        render_admin_direct_node_provision(result),
         parse_mode=ParseMode.HTML,
         reply_markup=kb.admin_keyboard(),
     )

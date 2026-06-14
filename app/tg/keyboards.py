@@ -19,6 +19,8 @@ ADMIN_REVIEW_ORDERS = "Проверить заказы"
 ADMIN_FIND_ORDER = "Найти оплату"
 ADMIN_PAYMENT_MODE = "Система оплаты"
 ADMIN_CREATE_KEY = "Создать admin key"
+ADMIN_DIRECT_NODE_AUDIT = "Direct-node audit"
+ADMIN_DIRECT_NODE_CREATE = "Direct-node create"
 ADMIN_KEYS = "Личные ключи"
 ADMIN_MAIN_MENU = "Главное меню"
 
@@ -43,6 +45,7 @@ def admin_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text=ADMIN_REVIEW_ORDERS), KeyboardButton(text=ADMIN_FIND_ORDER)],
             [KeyboardButton(text=ADMIN_KEYS), KeyboardButton(text=ADMIN_PAYMENT_MODE)],
             [KeyboardButton(text=ADMIN_CREATE_KEY), KeyboardButton(text=ADMIN_ROTATE_FREE)],
+            [KeyboardButton(text=ADMIN_DIRECT_NODE_AUDIT), KeyboardButton(text=ADMIN_DIRECT_NODE_CREATE)],
             [KeyboardButton(text=ADMIN_POST_FREE)],
             [KeyboardButton(text=PROFILE), KeyboardButton(text=ADMIN_MAIN_MENU)],
         ],

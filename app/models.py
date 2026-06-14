@@ -81,6 +81,89 @@ class VpnNode(Base):
     keys: Mapped[list["VpnKey"]] = relationship(back_populates="node")
 
 
+class DirectNode(Base):
+    __tablename__ = "direct_nodes"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    country_code: Mapped[str] = mapped_column(String(8), index=True)
+    country_flag: Mapped[str] = mapped_column(String(16))
+    public_host: Mapped[str] = mapped_column(String(255))
+    public_ip: Mapped[str] = mapped_column(String(64))
+    api_base_url: Mapped[str] = mapped_column(String(512))
+    api_username: Mapped[str] = mapped_column(String(255), default="")
+    api_password: Mapped[str] = mapped_column(String(255), default="")
+    api_verify_tls: Mapped[bool] = mapped_column(Boolean, default=False)
+    api_timeout_seconds: Mapped[int] = mapped_column(Integer, default=20)
+    agent_url: Mapped[str] = mapped_column(String(512))
+    agent_token: Mapped[str] = mapped_column(String(255), default="")
+    agent_verify_tls: Mapped[bool] = mapped_column(Boolean, default=False)
+    agent_timeout_seconds: Mapped[int] = mapped_column(Integer, default=20)
+    vpn_port_min: Mapped[int] = mapped_column(Integer, default=30000)
+    vpn_port_max: Mapped[int] = mapped_column(Integer, default=39999)
+    reserved_ports: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="unknown", index=True)
+    last_health_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DirectInboundSlot(Base):
+    __tablename__ = "direct_inbound_slots"
+    __table_args__ = (
+        UniqueConstraint("node_id", "port", name="uq_direct_inbound_slots_node_port"),
+        UniqueConstraint("node_id", "slot_number", name="uq_direct_inbound_slots_node_slot_number"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    node_id: Mapped[str] = mapped_column(ForeignKey("direct_nodes.id"), index=True)
+    slot_number: Mapped[int] = mapped_column(Integer)
+    template_code: Mapped[str] = mapped_column(String(128), default="", index=True)
+    protocol: Mapped[str] = mapped_column(String(64), index=True)
+    inbound_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    port: Mapped[int] = mapped_column(Integer)
+    name: Mapped[str] = mapped_column(String(255))
+    speed_limit_mbit: Mapped[int] = mapped_column(Integer, default=40)
+    status: Mapped[str] = mapped_column(String(32), default="free", index=True)
+    assigned_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    last_assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DirectUserProfile(Base):
+    __tablename__ = "direct_user_profiles"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    node_id: Mapped[str] = mapped_column(ForeignKey("direct_nodes.id"), index=True)
+    inbound_slot_id: Mapped[int] = mapped_column(ForeignKey("direct_inbound_slots.id"), index=True)
+    template_code: Mapped[str] = mapped_column(String(128), default="", index=True)
+    protocol: Mapped[str] = mapped_column(String(64), index=True)
+    inbound_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    port: Mapped[int] = mapped_column(Integer)
+    client_id: Mapped[str] = mapped_column(String(128))
+    uuid_or_password: Mapped[str] = mapped_column(String(255))
+    public_link: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DirectSubscription(Base):
+    __tablename__ = "direct_subscriptions"
+    __table_args__ = (UniqueConstraint("subscription_token", name="uq_direct_subscriptions_token"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    node_id: Mapped[str] = mapped_column(ForeignKey("direct_nodes.id"), index=True)
+    subscription_token: Mapped[str] = mapped_column(String(128), index=True)
+    subscription_url: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Order(Base):
     __tablename__ = "orders"
 

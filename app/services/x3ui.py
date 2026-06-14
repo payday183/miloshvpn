@@ -874,7 +874,7 @@ class X3UIClient:
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
             base_url=self.target.base_url,
-            timeout=20.0,
+            timeout=max(1, self.settings.x3ui_timeout_seconds),
             follow_redirects=True,
             verify=self.settings.x3ui_tls_verify,
         )

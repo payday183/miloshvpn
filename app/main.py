@@ -1,4 +1,5 @@
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,6 +8,7 @@ from app.cache import ping as redis_ping
 from app.db import get_session, init_db
 from app.models import Order, User
 from app.services.billing import poll_donations
+from app.services.direct_node_admin import direct_subscription_payload
 from app.services.public_keys import get_active_public_key, rotate_public_key
 from app.services.stats import collect_stats
 from app.services.vpn import get_active_key, get_active_subscription
@@ -48,6 +50,14 @@ async def rotate_public_key_now(session: AsyncSession = Depends(get_session)) ->
 async def public_key(session: AsyncSession = Depends(get_session)) -> dict[str, str | None]:
     key = await get_active_public_key(session)
     return {"vless_uri": key.vless_uri if key else None}
+
+
+@app.get("/sub/direct/{token}", response_class=PlainTextResponse)
+async def direct_subscription(token: str, session: AsyncSession = Depends(get_session)) -> PlainTextResponse:
+    payload = await direct_subscription_payload(session, token)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    return PlainTextResponse(payload)
 
 
 @app.get("/api/users/{telegram_id}")

@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     x3ui_web_base_path: str = ""
     x3ui_sub_base_url: str = ""
     x3ui_tls_verify: bool = False
+    x3ui_timeout_seconds: int = 20
     x3ui_username: str = "admin"
     x3ui_password: str = "admin"
     my_3x_ui_login: str = ""
@@ -71,6 +72,98 @@ class Settings(BaseSettings):
     node_status_poll_interval_seconds: int = 3600
     expired_subscription_cleanup_enabled: bool = True
     expired_subscription_cleanup_interval_seconds: int = 86400
+
+    app_env: str = ""
+    node_provisioning_mode: Literal["disabled", "direct_node"] = "disabled"
+    enable_direct_node_provisioning: bool = False
+    enable_node_agent: bool = False
+    dry_run_first: bool = True
+
+    admin_test_enabled: bool = False
+    admin_test_user_id: int = 0
+    admin_test_telegram_id: int = 0
+    admin_test_node_id: str = "de-1"
+    admin_test_country_code: str = "DE"
+    admin_test_country_flag: str = "🇩🇪"
+    admin_test_create_sub: bool = False
+    admin_test_profiles_count: int = 5
+
+    subscription_mode: str = "single_sub_with_5_profiles"
+    subscription_title_template: str = "🇩🇪 Germany Test {user_id}"
+    subscription_base_url: str = ""
+    subscription_public_host: str = ""
+    subscription_token_secret: str = ""
+
+    node_de_1_id: str = "de-1"
+    node_de_1_name: str = "Germany-1"
+    node_de_1_country_code: str = "DE"
+    node_de_1_country_flag: str = "🇩🇪"
+    node_de_1_public_host: str = ""
+    node_de_1_public_ip: str = ""
+    node_de_1_3xui_base_url: str = ""
+    node_de_1_3xui_username: str = ""
+    node_de_1_3xui_password: str = ""
+    node_de_1_3xui_verify_tls: bool = False
+    node_de_1_3xui_timeout_seconds: int = 20
+    node_de_1_agent_url: str = ""
+    node_de_1_agent_token: str = ""
+    node_de_1_agent_verify_tls: bool = False
+    node_de_1_agent_timeout_seconds: int = 20
+    node_de_1_vpn_port_min: int = 30000
+    node_de_1_vpn_port_max: int = 39999
+    node_de_1_reserved_ports: str = "22,443,44217,2096,5353,6881-6999,6969,51413,1337,2710"
+
+    port_allocator_scope: Literal["per_node"] = "per_node"
+    profile_speed_limit_mbit: int = 40
+    profile_speed_limit_label: str = "5MBps"
+    tc_limit_enabled: bool = True
+    firewall_auto_open_ports: bool = True
+    firewall_provider: str = "ufw"
+    inbound_pool_enabled: bool = True
+    inbound_delete_on_user_move: bool = False
+    inbound_reuse_free_slots: bool = True
+    inbound_slot_id_prefix: str = "DE"
+    inbound_name_template: str = "{flag} {node_code}-SLOT-{slot_number}-{protocol}"
+    client_email_template: str = "u{user_id}-{protocol}-{slot_number}"
+    client_remark_template: str = "admin-test-u{user_id}-{protocol}"
+
+    r1_reality_public_key: str = ""
+    r1_reality_private_key: str = ""
+    r1_reality_dest: str = "www.amd.com:443"
+    r1_reality_utls: str = "safari"
+    r1_reality_spider_x: str = "/"
+    r2_reality_public_key: str = ""
+    r2_reality_private_key: str = ""
+    r2_reality_dest: str = "www.sony.com:443"
+    r2_reality_utls: str = "edge"
+    r2_reality_spider_x: str = "/"
+    r2_transport: str = "xhttp"
+    r2_xhttp_path: str = "/"
+    r2_xhttp_mode: str = "auto"
+    r2_xhttp_padding_bytes: str = "100-1000"
+    h3_protocol: str = "hysteria"
+    h3_tls_enabled: bool = True
+    h3_tls_sni: str = ""
+    h3_tls_cert_file: str = "/root/cert/ip/fullchain.pem"
+    h3_tls_key_file: str = "/root/cert/ip/privkey.pem"
+    h3_tls_min_version: str = "1.2"
+    h3_tls_max_version: str = "1.3"
+    h3_utls: str = "safari"
+    h3_ocsp_stapling_seconds: int = 3600
+    h3_decrypt: str = ""
+    h3_encrypt: str = ""
+    h3_auth: str = "X25519"
+    h3_vision_seed: str = "testseed"
+    r4_reality_public_key: str = ""
+    r4_reality_private_key: str = ""
+    r4_reality_dest: str = "www.intel.com:443"
+    r4_reality_utls: str = "edge"
+    r4_reality_spider_x: str = "/"
+    r5_reality_public_key: str = ""
+    r5_reality_private_key: str = ""
+    r5_reality_dest: str = "www.amd.com:443"
+    r5_reality_utls: str = "random"
+    r5_reality_spider_x: str = "/"
 
     @field_validator(
         "admin_ids",

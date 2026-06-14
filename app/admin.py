@@ -19,6 +19,12 @@ from app.services.admin_auth import (
 from app.services.admin_key_notifications import send_admin_reality_key
 from app.services.admin_keys import create_admin_key, create_admin_reality_key
 from app.services.billing import poll_donations
+from app.services.direct_node_admin import (
+    DirectNodeConfig,
+    check_direct_node_connection,
+    list_direct_node_configs,
+    save_direct_node_config,
+)
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
 from app.services.manual_orders import ManualOrderError, ManualOrderGrantResult, manually_confirm_order, search_orders_for_admin
 from app.services.payment_notifications import notify_paid_order
@@ -95,6 +101,54 @@ async def admin_panel(
     return HTMLResponse(
         render_admin_page(stats, system_state, subscriptions, pending_orders, private_keys, token, payment_provider)
     )
+
+
+@router.get("/admin/direct-nodes", response_class=HTMLResponse)
+async def direct_nodes_page(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> HTMLResponse:
+    token = request.query_params.get("token", "")
+    nodes = await list_direct_node_configs(session)
+    return HTMLResponse(render_direct_nodes_page(nodes, token))
+
+
+@router.post("/admin/direct-nodes/check", response_class=HTMLResponse)
+async def check_direct_node_action(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> HTMLResponse:
+    token = request.query_params.get("token", "")
+    form = await request.form()
+    config = direct_node_config_from_form(form)
+    checks = await check_direct_node_connection(config)
+    nodes = await list_direct_node_configs(session)
+    return HTMLResponse(render_direct_nodes_page(nodes, token, form_config=config, checks=checks))
+
+
+@router.post("/admin/direct-nodes", response_class=HTMLResponse)
+async def save_direct_node_action(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> HTMLResponse:
+    token = request.query_params.get("token", "")
+    form = await request.form()
+    config = direct_node_config_from_form(form)
+    checks = await check_direct_node_connection(config)
+    if any(check.status == "error" for check in checks):
+        nodes = await list_direct_node_configs(session)
+        return HTMLResponse(
+            render_direct_nodes_page(nodes, token, form_config=config, checks=checks, error="Сначала исправьте ошибки проверки."),
+            status_code=400,
+        )
+
+    await save_direct_node_config(session, config, status="online")
+    await session.commit()
+    nodes = await list_direct_node_configs(session)
+    return HTMLResponse(render_direct_nodes_page(nodes, token, checks=checks, notice="Узел сохранён."))
 
 
 @router.post("/admin/donations/poll")
@@ -742,6 +796,12 @@ def render_admin_page(
       </section>
 
       <section class="panel">
+        <h2>Direct-node тест</h2>
+        <p class="muted" style="margin-top: 0;">Отдельная настройка немецких direct-node узлов для админского теста. Основная система 3x-ui не меняется.</p>
+        <div class="actions"><a class="button secondary" href="/admin/direct-nodes{token_qs}">Открыть direct nodes</a></div>
+      </section>
+
+      <section class="panel">
         <h2>Активные подписки</h2>
         <table>
           <thead>
@@ -884,6 +944,195 @@ def render_order_search_page(query: str, orders: list[Order], token: str) -> str
     </main>
   </body>
 </html>"""
+
+
+def render_direct_nodes_page(
+    nodes: list[DirectNodeConfig],
+    token: str,
+    *,
+    form_config: DirectNodeConfig | None = None,
+    checks: list[object] | None = None,
+    notice: str = "",
+    error: str = "",
+) -> str:
+    token_qs = f"?{urlencode({'token': token})}" if token else ""
+    config = form_config or default_direct_node_form()
+    rows = "\n".join(render_direct_node_row(node) for node in nodes) or table_empty("Direct-node узлов пока нет")
+    checks_html = render_direct_node_checks(checks or [])
+    notice_html = f'<p class="muted">{escape(notice)}</p>' if notice else ""
+    error_html = f'<p class="error">{escape(error)}</p>' if error else ""
+    return f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Direct nodes</title>
+    <style>{admin_simple_page_css()}</style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <p class="eyebrow">MiloshVPN Admin</p>
+        <h1>Direct-node узлы</h1>
+        <p class="muted">Здесь хранятся только настройки узлов. Inbound-ы сюда не вписываются: они создаются отдельно на 3x-ui узла для конкретного пользователя.</p>
+        <div class="actions"><a class="button secondary" href="/admin{token_qs}">Назад</a></div>
+      </section>
+
+      <section class="panel">
+        <h2>Подключённые узлы</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Источник</th>
+              <th>Node</th>
+              <th>Публичный адрес</th>
+              <th>3x-ui</th>
+              <th>Agent</th>
+              <th>Порты</th>
+              <th>Статус</th>
+            </tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </section>
+
+      <section class="panel">
+        <h2>Проверить и добавить узел</h2>
+        {notice_html}
+        {error_html}
+        {checks_html}
+        <form method="post" action="/admin/direct-nodes/check{token_qs}" class="grid" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
+          {direct_node_form_fields(config)}
+          <div class="actions">
+            <button type="submit" formaction="/admin/direct-nodes/check{token_qs}">Проверить соединение</button>
+            <button class="secondary" type="submit" formaction="/admin/direct-nodes{token_qs}">Проверить и сохранить</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def render_direct_node_row(node: DirectNodeConfig) -> str:
+    api_state = "задано" if node.api_base_url and node.api_username and node.api_password else "неполно"
+    agent_state = "задан" if node.agent_url else "не задан"
+    public = node.public_host or node.public_ip
+    return f"""<tr>
+      <td><span class="badge">{escape(node.source)}</span></td>
+      <td><code>{escape(node.node_id)}</code><br>{escape(node.country_flag)} {escape(node.name)} / {escape(node.country_code)}</td>
+      <td>{escape(public or "не задан")}</td>
+      <td>{escape(api_state)}<br><span class="muted">TLS verify: {escape(str(node.api_verify_tls).lower())}</span></td>
+      <td>{escape(agent_state)}<br><span class="muted">token: {escape("задан" if node.agent_token else "пусто")}</span></td>
+      <td><code>{node.vpn_port_min}-{node.vpn_port_max}</code></td>
+      <td><span class="badge">{escape(node.status)}</span></td>
+    </tr>"""
+
+
+def render_direct_node_checks(checks: list[object]) -> str:
+    if not checks:
+        return ""
+    lines = ['<div class="panel" style="margin: 0 0 14px; padding: 12px;"><h2 style="font-size: 16px;">Проверка</h2>']
+    for check in checks:
+        status = str(getattr(check, "status", ""))
+        css = "active" if status == "ok" else "offline" if status == "error" else ""
+        title = escape(str(getattr(check, "title", "")))
+        detail = escape(str(getattr(check, "detail", "")))
+        lines.append(f'<p><span class="badge {css}">{escape(status)}</span> <strong>{title}</strong>: {detail}</p>')
+    lines.append("</div>")
+    return "\n".join(lines)
+
+
+def direct_node_form_fields(config: DirectNodeConfig) -> str:
+    return f"""
+          <label>Node ID<input name="node_id" value="{escape(config.node_id)}" placeholder="de-1"></label>
+          <label>Название<input name="name" value="{escape(config.name)}" placeholder="Germany-1"></label>
+          <label>Country code<input name="country_code" value="{escape(config.country_code)}" placeholder="DE"></label>
+          <label>Flag<input name="country_flag" value="{escape(config.country_flag)}" placeholder="🇩🇪"></label>
+          <label>Public host<input name="public_host" value="{escape(config.public_host)}" placeholder="de.example.com"></label>
+          <label>Public IP<input name="public_ip" value="{escape(config.public_ip)}" placeholder="1.2.3.4"></label>
+          <label>3x-ui URL<input name="api_base_url" value="{escape(config.api_base_url)}" placeholder="https://host/panel-path"></label>
+          <label>3x-ui username<input name="api_username" value="{escape(config.api_username)}"></label>
+          <label>3x-ui password<input type="password" name="api_password" value="{escape(config.api_password)}"></label>
+          <label>3x-ui verify TLS<select name="api_verify_tls">{bool_options(config.api_verify_tls)}</select></label>
+          <label>3x-ui timeout seconds<input name="api_timeout_seconds" value="{config.api_timeout_seconds}" inputmode="numeric"></label>
+          <label>Agent URL<input name="agent_url" value="{escape(config.agent_url)}" placeholder="https://node-agent.example.com"></label>
+          <label>Agent token<input type="password" name="agent_token" value="{escape(config.agent_token)}"></label>
+          <label>Agent verify TLS<select name="agent_verify_tls">{bool_options(config.agent_verify_tls)}</select></label>
+          <label>Agent timeout seconds<input name="agent_timeout_seconds" value="{config.agent_timeout_seconds}" inputmode="numeric"></label>
+          <label>VPN port min<input name="vpn_port_min" value="{config.vpn_port_min}" inputmode="numeric"></label>
+          <label>VPN port max<input name="vpn_port_max" value="{config.vpn_port_max}" inputmode="numeric"></label>
+          <label>Reserved ports<input name="reserved_ports" value="{escape(config.reserved_ports)}" placeholder="22,443,6881-6999"></label>
+    """
+
+
+def bool_options(value: bool) -> str:
+    true_selected = " selected" if value else ""
+    false_selected = "" if value else " selected"
+    return f'<option value="false"{false_selected}>false</option><option value="true"{true_selected}>true</option>'
+
+
+def default_direct_node_form() -> DirectNodeConfig:
+    settings = get_settings()
+    return DirectNodeConfig(
+        source="form",
+        node_id=settings.node_de_1_id,
+        name=settings.node_de_1_name,
+        country_code=settings.node_de_1_country_code,
+        country_flag=settings.node_de_1_country_flag,
+        public_host=settings.node_de_1_public_host,
+        public_ip=settings.node_de_1_public_ip,
+        api_base_url=settings.node_de_1_3xui_base_url,
+        api_username=settings.node_de_1_3xui_username,
+        api_password="",
+        api_verify_tls=settings.node_de_1_3xui_verify_tls,
+        api_timeout_seconds=settings.node_de_1_3xui_timeout_seconds,
+        agent_url=settings.node_de_1_agent_url,
+        agent_token="",
+        agent_verify_tls=settings.node_de_1_agent_verify_tls,
+        agent_timeout_seconds=settings.node_de_1_agent_timeout_seconds,
+        vpn_port_min=settings.node_de_1_vpn_port_min,
+        vpn_port_max=settings.node_de_1_vpn_port_max,
+        reserved_ports=settings.node_de_1_reserved_ports,
+    )
+
+
+def direct_node_config_from_form(form: object) -> DirectNodeConfig:
+    def text(name: str, default: str = "") -> str:
+        return str(form.get(name) or default).strip()
+
+    return DirectNodeConfig(
+        source="form",
+        node_id=text("node_id", "de-1"),
+        name=text("name", "Germany-1"),
+        country_code=text("country_code", "DE"),
+        country_flag=text("country_flag", "🇩🇪"),
+        public_host=text("public_host"),
+        public_ip=text("public_ip"),
+        api_base_url=text("api_base_url"),
+        api_username=text("api_username"),
+        api_password=text("api_password"),
+        api_verify_tls=parse_bool(text("api_verify_tls")),
+        api_timeout_seconds=parse_positive_int(text("api_timeout_seconds"), 20),
+        agent_url=text("agent_url"),
+        agent_token=text("agent_token"),
+        agent_verify_tls=parse_bool(text("agent_verify_tls")),
+        agent_timeout_seconds=parse_positive_int(text("agent_timeout_seconds"), 20),
+        vpn_port_min=parse_positive_int(text("vpn_port_min"), 30000),
+        vpn_port_max=parse_positive_int(text("vpn_port_max"), 39999),
+        reserved_ports=text("reserved_ports", "22,443,6881-6999"),
+    )
+
+
+def parse_bool(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def parse_positive_int(value: str, default: int) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return default
 
 
 def render_manual_order_grant_page(result: ManualOrderGrantResult, notified: bool, token: str) -> str:

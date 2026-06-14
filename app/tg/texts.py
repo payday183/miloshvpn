@@ -464,11 +464,14 @@ def admin_help_text() -> str:
         "• увидеть личные ключи и удалить лишний;\n"
         "• создать admin key без оплаты;\n"
         "• создать admin Reality test key;\n"
+        "• открыть web-страницу direct-node узлов и запустить audit для админского Germany test;\n"
         "• управлять бесплатным публичным ключом.\n\n"
         "<code>/add_admin TELEGRAM_ID</code> — добавить админа.\n"
         "<code>/find_order КОД_ИЛИ_ID</code> — найти оплату.\n"
         "<code>/admin_key</code> — создать admin key.\n"
-        "<code>/admin_reality_key</code> — создать admin Reality test key."
+        "<code>/admin_reality_key</code> — создать admin Reality test key.\n"
+        "<code>/admin_direct_node_audit</code> — dry-run direct-node Germany test.\n"
+        "<code>/admin_direct_node_create</code> — создать 5 direct-node inbound-ов для админа, если dry-run выключен."
     )
 
 
