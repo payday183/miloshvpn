@@ -1,3 +1,6 @@
+import base64
+from urllib.parse import quote
+
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
@@ -16,6 +19,7 @@ from app.timeutils import utcnow
 
 app = FastAPI(title="MiloshVPN Control Center")
 app.include_router(admin_router)
+SUBSCRIPTION_DISPLAY_NAME = "MiloshVPN"
 
 
 @app.on_event("startup")
@@ -57,7 +61,16 @@ async def direct_subscription(token: str, session: AsyncSession = Depends(get_se
     payload = await direct_subscription_payload(session, token)
     if payload is None:
         raise HTTPException(status_code=404, detail="Subscription not found")
-    return PlainTextResponse(payload)
+    return PlainTextResponse(payload, headers=subscription_response_headers())
+
+
+def subscription_response_headers() -> dict[str, str]:
+    encoded_title = base64.b64encode(SUBSCRIPTION_DISPLAY_NAME.encode("utf-8")).decode("ascii")
+    filename = f"{SUBSCRIPTION_DISPLAY_NAME}.txt"
+    return {
+        "profile-title": f"base64:{encoded_title}",
+        "Content-Disposition": f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quote(filename)}',
+    }
 
 
 @app.get("/api/users/{telegram_id}")

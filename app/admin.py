@@ -1,3 +1,5 @@
+from collections import Counter
+from dataclasses import dataclass
 from html import escape
 from urllib.parse import urlencode
 
@@ -10,7 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.db import get_session
-from app.models import BotAdmin, Order, Subscription, User, VpnKey
+from app.models import BotAdmin, DirectUserProfile, Order, Subscription, User, VpnKey
 from app.services.admin_auth import (
     admin_panel_url_with_token,
     verify_admin_profile_signature,
@@ -23,6 +25,7 @@ from app.services.direct_node_admin import (
     DirectNodeConfig,
     check_direct_node_connection,
     list_direct_node_configs,
+    release_direct_key_slots,
     save_direct_node_config,
 )
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
@@ -37,10 +40,25 @@ from app.services.payment_modes import (
 from app.services.public_keys import rotate_public_key
 from app.services.stats import collect_stats
 from app.services.system_x3ui import collect_system_x3ui_state
-from app.services.vpn import list_active_private_keys, revoke_private_key
+from app.services.vpn import list_active_private_keys, revoke_key_remote, revoke_private_key
 from app.timeutils import utcnow
 
 router = APIRouter()
+
+
+@dataclass(frozen=True)
+class AdminUserMonitorRow:
+    user: User
+    subscription: Subscription | None
+    key: VpnKey | None
+    plan_kind: str
+    key_state: str
+    server_label: str
+    direct_profiles: int
+    assigned_inbounds: int
+    expired_keys: int
+    paid_orders: int
+    total_orders: int
 
 
 async def require_admin_token(request: Request) -> None:
@@ -112,6 +130,40 @@ async def direct_nodes_page(
     token = request.query_params.get("token", "")
     nodes = await list_direct_node_configs(session)
     return HTMLResponse(render_direct_nodes_page(nodes, token))
+
+
+@router.get("/admin/users", response_class=HTMLResponse)
+async def admin_users_page(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> HTMLResponse:
+    token = request.query_params.get("token", "")
+    rows = await admin_user_monitor_rows(session)
+    filtered_rows = filter_admin_user_rows(rows, request.query_params)
+    sorted_rows = sort_admin_user_rows(filtered_rows, str(request.query_params.get("sort") or "created_desc"))
+    return HTMLResponse(render_admin_users_page(sorted_rows, rows, request, token))
+
+
+@router.post("/admin/users/{user_id}/delete-access")
+async def admin_delete_user_access_action(
+    user_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> RedirectResponse:
+    form = await request.form()
+    delete_inbounds = str(form.get("delete_inbounds") or "").lower() in {"1", "true", "on", "yes"}
+    result = await delete_user_access(session, user_id, delete_inbounds=delete_inbounds)
+    await session.commit()
+    token = request.query_params.get("token", "")
+    notice = (
+        f"Доступ удалён: ключей {result['keys']}, inbound-ов удалено {result['inbounds']}"
+        if delete_inbounds
+        else f"Ключ удалён: ключей {result['keys']}, inbound-ы оставлены за пользователем"
+    )
+    suffix = urlencode({"token": token, "notice": notice}) if token else urlencode({"notice": notice})
+    return RedirectResponse(url=f"/admin/users?{suffix}", status_code=303)
 
 
 @router.post("/admin/direct-nodes/check", response_class=HTMLResponse)
@@ -315,6 +367,175 @@ async def api_subscriptions(
 ) -> list[dict[str, object]]:
     rows = await active_subscriptions(session)
     return [serialize_subscription(subscription, key) for subscription, key in rows]
+
+
+async def admin_user_monitor_rows(session: AsyncSession) -> list[AdminUserMonitorRow]:
+    now = utcnow()
+    users = (
+        await session.scalars(
+            select(User)
+            .options(
+                selectinload(User.subscriptions),
+                selectinload(User.keys),
+                selectinload(User.orders),
+            )
+            .order_by(User.created_at.desc())
+            .limit(1000)
+        )
+    ).all()
+
+    profile_counts = Counter()
+    profiles = (
+        await session.scalars(
+            select(DirectUserProfile).where(DirectUserProfile.status == "active")
+        )
+    ).all()
+    for profile in profiles:
+        profile_counts[profile.user_id] += 1
+
+    rows: list[AdminUserMonitorRow] = []
+    for user in users:
+        subscription = latest_user_subscription(user, now)
+        key = latest_user_key(user, now)
+        active_key = key is not None and key.active and (key.expires_at is None or key.expires_at > now)
+        expired_keys = sum(
+            1
+            for item in user.keys
+            if item.key_type == "private" and (not item.active or (item.expires_at is not None and item.expires_at <= now))
+        )
+        paid_orders = sum(1 for order in user.orders if order.status == "paid")
+        total_orders = len(user.orders)
+        direct_profiles = profile_counts[user.id]
+        inbound_count = len(key.x3ui_inbound_ids or []) if key is not None else 0
+        plan_kind = plan_kind_for_subscription(subscription, now)
+        key_state = "active" if active_key else "expired" if key is not None else "no_key"
+        rows.append(
+            AdminUserMonitorRow(
+                user=user,
+                subscription=subscription,
+                key=key,
+                plan_kind=plan_kind,
+                key_state=key_state,
+                server_label=key.server_label if key and key.server_label else "нет ключа",
+                direct_profiles=direct_profiles,
+                assigned_inbounds=inbound_count or direct_profiles,
+                expired_keys=expired_keys,
+                paid_orders=paid_orders,
+                total_orders=total_orders,
+            )
+        )
+    return rows
+
+
+def latest_user_subscription(user: User, now) -> Subscription | None:
+    active = [
+        subscription
+        for subscription in user.subscriptions
+        if subscription.status == "active" and subscription.expires_at > now
+    ]
+    if active:
+        return max(active, key=lambda item: item.expires_at)
+    return max(user.subscriptions, key=lambda item: item.expires_at, default=None)
+
+
+def latest_user_key(user: User, now) -> VpnKey | None:
+    active = [
+        key
+        for key in user.keys
+        if key.key_type == "private" and key.active and (key.expires_at is None or key.expires_at > now)
+    ]
+    if active:
+        return max(active, key=lambda item: item.created_at)
+    private_keys = [key for key in user.keys if key.key_type == "private"]
+    return max(private_keys, key=lambda item: item.created_at, default=None)
+
+
+def plan_kind_for_subscription(subscription: Subscription | None, now) -> str:
+    if subscription is None:
+        return "none"
+    if subscription.status != "active" or subscription.expires_at <= now:
+        return "expired"
+    if subscription.plan_code == "trial":
+        return "free"
+    return "paid"
+
+
+def filter_admin_user_rows(rows: list[AdminUserMonitorRow], params) -> list[AdminUserMonitorRow]:
+    query = str(params.get("q") or "").strip().lower()
+    plan = str(params.get("plan") or "all")
+    key_state = str(params.get("key") or "all")
+    server = str(params.get("server") or "all")
+
+    filtered = rows
+    if query:
+        filtered = [
+            row
+            for row in filtered
+            if query in str(row.user.telegram_id)
+            or query in str(row.user.id)
+            or query in (row.user.username or "").lower()
+            or query in (row.user.first_name or "").lower()
+        ]
+    if plan != "all":
+        filtered = [row for row in filtered if row.plan_kind == plan]
+    if key_state != "all":
+        filtered = [row for row in filtered if row.key_state == key_state]
+    if server != "all":
+        filtered = [row for row in filtered if row.server_label == server]
+    return filtered
+
+
+def sort_admin_user_rows(rows: list[AdminUserMonitorRow], sort: str) -> list[AdminUserMonitorRow]:
+    sorters = {
+        "buy_desc": lambda row: (int(row.user.buy_clicks or 0), row.user.created_at),
+        "support_desc": lambda row: (int(row.user.support_clicks or 0), row.user.created_at),
+        "replace_desc": lambda row: (int(row.user.replace_key_clicks or 0), row.user.created_at),
+        "expires_asc": lambda row: (row.subscription.expires_at if row.subscription else utcnow(), row.user.created_at),
+        "inbounds_desc": lambda row: (row.assigned_inbounds, row.user.created_at),
+        "paid_orders_desc": lambda row: (row.paid_orders, row.user.created_at),
+        "created_desc": lambda row: (row.user.created_at,),
+    }
+    key = sorters.get(sort, sorters["created_desc"])
+    reverse = sort != "expires_asc"
+    return sorted(rows, key=key, reverse=reverse)
+
+
+async def delete_user_access(session: AsyncSession, user_id: int, *, delete_inbounds: bool) -> dict[str, int]:
+    now = utcnow()
+    keys = (
+        await session.scalars(
+            select(VpnKey)
+            .where(VpnKey.user_id == user_id, VpnKey.key_type == "private", VpnKey.active.is_(True))
+            .with_for_update()
+        )
+    ).all()
+    revoked_keys = 0
+    deleted_inbounds = 0
+    for key in keys:
+        await revoke_key_remote(session, key)
+        deleted_inbounds += len(key.x3ui_inbound_ids or []) if delete_inbounds else 0
+        key.active = False
+        key.revoked_at = now
+        await release_direct_key_slots(
+            session,
+            key,
+            status="admin_deleted",
+            release_slots=delete_inbounds,
+            delete_remote_inbounds=delete_inbounds,
+        )
+        revoked_keys += 1
+
+    subscriptions = (
+        await session.scalars(
+            select(Subscription)
+            .where(Subscription.user_id == user_id, Subscription.status == "active")
+            .with_for_update()
+        )
+    ).all()
+    for subscription in subscriptions:
+        subscription.status = "admin_deleted"
+
+    return {"keys": revoked_keys, "inbounds": deleted_inbounds}
 
 
 async def get_admin_user(session: AsyncSession, telegram_id: int) -> User | None:
@@ -802,6 +1023,12 @@ def render_admin_page(
       </section>
 
       <section class="panel">
+        <h2>Пользователи</h2>
+        <p class="muted" style="margin-top: 0;">Мониторинг подписок, inbound-ов, серверов и кликов по Купить / Поддержка / Заменить sub.</p>
+        <div class="actions"><a class="button secondary" href="/admin/users{token_qs}">Открыть пользователей</a></div>
+      </section>
+
+      <section class="panel">
         <h2>Активные подписки</h2>
         <table>
           <thead>
@@ -944,6 +1171,219 @@ def render_order_search_page(query: str, orders: list[Order], token: str) -> str
     </main>
   </body>
 </html>"""
+
+
+def render_admin_users_page(
+    rows: list[AdminUserMonitorRow],
+    all_rows: list[AdminUserMonitorRow],
+    request: Request,
+    token: str,
+) -> str:
+    token_qs = f"?{urlencode({'token': token})}" if token else ""
+    notice = str(request.query_params.get("notice") or "")
+    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    filters = render_admin_user_filters(request, token, all_rows)
+    stats = render_admin_user_stats(all_rows)
+    table_rows = "\n".join(render_admin_user_row(row, token_qs) for row in rows) or table_empty("По фильтрам никого нет")
+    return f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Пользователи MiloshVPN</title>
+    <style>{admin_users_page_css()}</style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <p class="eyebrow">MiloshVPN Admin</p>
+        <h1>Пользователи</h1>
+        <p class="muted">Все пользователи, подписки, ключи, direct inbound-ы и действия в боте.</p>
+        <div class="actions">
+          <a class="button secondary" href="/admin{token_qs}">Главная</a>
+          <a class="button secondary" href="/admin/direct-nodes{token_qs}">Direct nodes</a>
+        </div>
+      </section>
+
+      <section class="stats">{stats}</section>
+
+      <section class="panel">
+        <h2>Фильтры</h2>
+        {notice_html}
+        {filters}
+      </section>
+
+      <section class="panel">
+        <h2>Список: {len(rows)} из {len(all_rows)}</h2>
+        <table class="users-table">
+          <thead>
+            <tr>
+              <th>Пользователь</th>
+              <th>Подписка</th>
+              <th>Ключ / сервер</th>
+              <th>Inbound-ы</th>
+              <th>Действия</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>{table_rows}</tbody>
+        </table>
+      </section>
+
+      <dialog id="delete-dialog">
+        <form method="post" id="delete-form">
+          <h2>Удалить доступ?</h2>
+          <p id="delete-user-label" class="muted"></p>
+          <label class="checkline">
+            <input type="checkbox" name="delete_inbounds" value="1">
+            Удалить также direct inbound-ы пользователя
+          </label>
+          <p class="muted">Без галочки будет удалён только активный клиент/ключ, а inbound-слоты останутся закреплены за пользователем.</p>
+          <div class="actions">
+            <button class="danger" type="submit">Удалить</button>
+            <button class="secondary" type="button" onclick="closeDeleteDialog()">Отмена</button>
+          </div>
+        </form>
+      </dialog>
+    </main>
+    <script>
+      const dialog = document.getElementById('delete-dialog');
+      const form = document.getElementById('delete-form');
+      const label = document.getElementById('delete-user-label');
+      function openDeleteDialog(button) {{
+        form.action = button.dataset.action;
+        label.textContent = button.dataset.user;
+        form.querySelector('input[name="delete_inbounds"]').checked = false;
+        if (dialog.showModal) dialog.showModal(); else if (confirm('Удалить доступ пользователя?')) form.submit();
+      }}
+      function closeDeleteDialog() {{
+        dialog.close();
+      }}
+    </script>
+  </body>
+</html>"""
+
+
+def render_admin_user_stats(rows: list[AdminUserMonitorRow]) -> str:
+    total = len(rows)
+    active_keys = sum(1 for row in rows if row.key_state == "active")
+    paid = sum(1 for row in rows if row.plan_kind == "paid")
+    free = sum(1 for row in rows if row.plan_kind == "free")
+    expired = sum(1 for row in rows if row.plan_kind == "expired")
+    direct_inbounds = sum(row.assigned_inbounds for row in rows)
+    server_counts = Counter(row.server_label for row in rows if row.server_label != "нет ключа")
+    server_text = ", ".join(f"{escape(server)}: {count}" for server, count in server_counts.most_common()) or "нет"
+    return "\n".join(
+        [
+            render_stat("Всего", total),
+            render_stat("Активные ключи", active_keys),
+            render_stat("Платные", paid),
+            render_stat("Бесплатные", free),
+            render_stat("Истекли", expired),
+            render_stat("Inbound-ы", direct_inbounds),
+            f'<div class="stat wide"><span>По серверам</span><strong>{server_text}</strong></div>',
+        ]
+    )
+
+
+def render_admin_user_filters(request: Request, token: str, rows: list[AdminUserMonitorRow]) -> str:
+    params = request.query_params
+    q = str(params.get("q") or "")
+    plan = str(params.get("plan") or "all")
+    key_state = str(params.get("key") or "all")
+    server = str(params.get("server") or "all")
+    sort = str(params.get("sort") or "created_desc")
+    server_options = [("all", "Все серверы")]
+    server_options.extend((label, label) for label in sorted({row.server_label for row in rows if row.server_label != "нет ключа"}))
+    return f"""
+        <form method="get" action="/admin/users" class="grid filters">
+          {hidden_token_input(token)}
+          <label>Поиск<input name="q" value="{escape(q)}" placeholder="@username, Telegram ID, user ID"></label>
+          <label>Подписка<select name="plan">{option_tags([("all", "Все"), ("paid", "Платные"), ("free", "Бесплатные trial"), ("expired", "Истекшие"), ("none", "Без подписки")], plan)}</select></label>
+          <label>Ключ<select name="key">{option_tags([("all", "Все"), ("active", "Активный"), ("expired", "Истёк / отключён"), ("no_key", "Нет ключа")], key_state)}</select></label>
+          <label>Сервер<select name="server">{option_tags(server_options, server)}</select></label>
+          <label>Сортировка<select name="sort">{option_tags([("created_desc", "Новые сверху"), ("buy_desc", "Купить: больше сверху"), ("support_desc", "Поддержка: больше сверху"), ("replace_desc", "Замены: больше сверху"), ("paid_orders_desc", "Оплат: больше сверху"), ("inbounds_desc", "Inbound-ы: больше сверху"), ("expires_asc", "Истекают раньше")], sort)}</select></label>
+          <div class="actions">
+            <button type="submit">Показать</button>
+            <a class="button secondary" href="/admin/users{('?' + urlencode({'token': token})) if token else ''}">Сбросить</a>
+          </div>
+        </form>
+    """
+
+
+def render_admin_user_row(row: AdminUserMonitorRow, token_qs: str) -> str:
+    user = row.user
+    username = f"@{escape(user.username)}" if user.username else "без username"
+    first_name = escape(user.first_name or "")
+    created = format_admin_dt(user.created_at)
+    sub_label = subscription_admin_label(row.subscription, row.plan_kind)
+    sub_until = format_admin_dt(row.subscription.expires_at) if row.subscription else "нет"
+    key_label = key_admin_label(row.key, row.key_state)
+    key_until = format_admin_dt(row.key.expires_at) if row.key and row.key.expires_at else "без срока"
+    action_url = f"/admin/users/{user.id}/delete-access{token_qs}"
+    return f"""<tr>
+      <td data-label="Пользователь">
+        <strong>{username}</strong><br>
+        <span class="muted">{first_name}</span><br>
+        <code>{user.telegram_id}</code><br>
+        <span class="muted">ID {user.id}, с {created}</span>
+      </td>
+      <td data-label="Подписка">
+        {sub_label}<br>
+        <span class="muted">до {sub_until}</span><br>
+        <span class="muted">оплат: {row.paid_orders}/{row.total_orders}</span>
+      </td>
+      <td data-label="Ключ / сервер">
+        {key_label}<br>
+        <span class="muted">{escape(row.server_label)}</span><br>
+        <span class="muted">до {key_until}</span><br>
+        <span class="muted">истёкших ключей: {row.expired_keys}</span>
+      </td>
+      <td data-label="Inbound-ы">
+        <strong>{row.assigned_inbounds}</strong><br>
+        <span class="muted">direct профилей: {row.direct_profiles}</span>
+      </td>
+      <td data-label="Действия">
+        Купить: <strong>{int(user.buy_clicks or 0)}</strong><br>
+        Поддержка: <strong>{int(user.support_clicks or 0)}</strong><br>
+        Замена: <strong>{int(user.replace_key_clicks or 0)}</strong><br>
+        Успешно: <strong>{int(user.replace_key_successes or 0)}</strong>
+      </td>
+      <td data-label="Управление">
+        <button class="danger" type="button" data-action="{escape(action_url)}" data-user="{username} / {user.telegram_id}" onclick="openDeleteDialog(this)">Удалить доступ</button>
+      </td>
+    </tr>"""
+
+
+def option_tags(options: list[tuple[str, str]], selected: str) -> str:
+    return "\n".join(
+        f'<option value="{escape(value)}"{" selected" if value == selected else ""}>{escape(label)}</option>'
+        for value, label in options
+    )
+
+
+def subscription_admin_label(subscription: Subscription | None, plan_kind: str) -> str:
+    if subscription is None:
+        return '<span class="badge">нет</span>'
+    css = "active" if plan_kind in {"paid", "free"} else "offline" if plan_kind == "expired" else ""
+    label = {
+        "paid": "платная",
+        "free": "trial",
+        "expired": "истекла",
+        "none": "нет",
+    }.get(plan_kind, plan_kind)
+    return f'<span class="badge {css}">{escape(label)}</span> <code>{escape(subscription.plan_code)}</code>'
+
+
+def key_admin_label(key: VpnKey | None, key_state: str) -> str:
+    if key is None:
+        return '<span class="badge">нет ключа</span>'
+    css = "active" if key_state == "active" else "offline"
+    return f'<span class="badge {css}">{escape(key_state)}</span> <code>{escape(key.email)}</code>'
+
+
+def format_admin_dt(value) -> str:
+    return value.strftime("%d.%m.%Y %H:%M UTC") if value else "нет"
 
 
 def render_direct_nodes_page(
@@ -1354,6 +1794,119 @@ def admin_simple_page_css() -> str:
         .grid { grid-template-columns: 1fr; }
         table { display: block; overflow-x: auto; }
         dl div { grid-template-columns: 1fr; gap: 4px; }
+      }
+    """
+
+
+def admin_users_page_css() -> str:
+    return admin_simple_page_css() + """
+      main {
+        max-width: 1280px;
+      }
+      .filters {
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      }
+      .stat.wide {
+        grid-column: span 2;
+      }
+      .stat.wide strong {
+        font-size: 15px;
+        line-height: 1.45;
+      }
+      .notice {
+        margin: 0 0 14px;
+        padding: 10px 12px;
+        border-radius: 6px;
+        background: #dff7e8;
+        color: #116b35;
+      }
+      .users-table td:last-child {
+        width: 150px;
+      }
+      dialog {
+        width: min(92vw, 460px);
+        border: 1px solid #dfe5ec;
+        border-radius: 8px;
+        padding: 18px;
+        box-shadow: 0 24px 80px rgba(20, 28, 38, 0.18);
+      }
+      dialog::backdrop {
+        background: rgba(18, 20, 23, 0.42);
+      }
+      .checkline {
+        display: flex;
+        grid-template-columns: none;
+        align-items: center;
+        gap: 10px;
+        margin: 14px 0;
+        color: #121417;
+      }
+      .checkline input {
+        width: auto;
+      }
+      @media (max-width: 820px) {
+        main {
+          padding: 12px;
+        }
+        .stats {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .stat.wide {
+          grid-column: 1 / -1;
+        }
+        .users-table,
+        .users-table thead,
+        .users-table tbody,
+        .users-table tr,
+        .users-table th,
+        .users-table td {
+          display: block;
+          width: 100%;
+        }
+        .users-table thead {
+          display: none;
+        }
+        .users-table tr {
+          border: 1px solid #dfe5ec;
+          border-radius: 8px;
+          margin-bottom: 12px;
+          padding: 8px 10px;
+          background: #fff;
+        }
+        .users-table td {
+          border-bottom: 1px solid #edf1f5;
+          padding: 9px 0;
+        }
+        .users-table td:last-child {
+          border-bottom: 0;
+          width: 100%;
+        }
+        .users-table td::before {
+          content: attr(data-label);
+          display: block;
+          margin-bottom: 4px;
+          color: #687385;
+          font-size: 12px;
+          text-transform: uppercase;
+        }
+        button,
+        .button {
+          width: 100%;
+        }
+        .actions {
+          width: 100%;
+        }
+      }
+      @media (max-width: 460px) {
+        .stats {
+          grid-template-columns: 1fr;
+        }
+        h1 {
+          font-size: 23px;
+        }
+        .panel {
+          padding: 14px;
+        }
       }
     """
 

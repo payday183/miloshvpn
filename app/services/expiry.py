@@ -3,7 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import Subscription, VpnKey
-from app.services.x3ui import X3UIClient
+from app.services.direct_node_admin import release_direct_key_slots
+from app.services.vpn import revoke_key_remote
 from app.timeutils import utcnow
 
 
@@ -31,7 +32,7 @@ async def expire_subscriptions(session: AsyncSession, *, limit: int = 200) -> di
             if not key.active:
                 continue
             try:
-                await X3UIClient().revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+                await revoke_key_remote(session, key)
             except Exception:
                 # Keep the key active so the next cleanup pass retries the 3x-ui deletion.
                 failed_revokes += 1
@@ -39,6 +40,7 @@ async def expire_subscriptions(session: AsyncSession, *, limit: int = 200) -> di
 
             key.active = False
             key.revoked_at = now
+            await release_direct_key_slots(session, key, status="expired")
             revoked_keys += 1
 
     await session.commit()
@@ -72,13 +74,14 @@ async def retry_expired_key_revokes(session: AsyncSession, *, limit: int = 200) 
             key.subscription.status = "expired"
 
         try:
-            await X3UIClient().revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+            await revoke_key_remote(session, key)
         except Exception:
             failed_revokes += 1
             continue
 
         key.active = False
         key.revoked_at = now
+        await release_direct_key_slots(session, key, status="expired")
         revoked_keys += 1
 
     await session.commit()

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 import re
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -52,6 +53,7 @@ from app.services.public_keys import (
 from app.services.referrals import capture_start_referral, credit_pending_referral, referral_profile_for_user
 from app.services.seed import ADMIN_TEST_PLAN_CODE
 from app.services.stats import collect_stats
+from app.services.user_actions import record_user_action
 from app.services.users import add_admin, get_or_create_user, is_admin
 from app.services.vpn import (
     ensure_trial_subscription,
@@ -103,6 +105,16 @@ PENDING_FAST_REVIEW_UPLOADS: set[int] = set()
 REVIEW_QUEUE_STATE: dict[int, list[int]] = {}
 REVIEW_QUEUE_TOTALS: dict[int, int] = {}
 BOT_USERNAME_CACHE = ""
+REPLACE_KEY_CHALLENGES: dict[int, str] = {}
+REPLACE_KEY_CHALLENGE_PREFIX = "replace_key_challenge:"
+REPLACE_KEY_CHALLENGE_OPTIONS: tuple[tuple[str, str, str, str], ...] = (
+    ("dolphin", "Дельфин", "дельфина", "🐬"),
+    ("tiger", "Тигр", "тигра", "🐯"),
+    ("whale", "Кит", "кита", "🐋"),
+    ("fox", "Лиса", "лису", "🦊"),
+    ("lion", "Лев", "льва", "🦁"),
+    ("panda", "Панда", "панду", "🐼"),
+)
 
 
 class PendingFastReviewFilter(BaseFilter):
@@ -161,6 +173,57 @@ def profile_reply_markup(
             include_replace=True,
         )
     return kb.admin_profile_keyboard(build_admin_profile_url(user.telegram_id)) if admin else kb.main_keyboard(admin)
+
+
+def replace_key_challenge_keyboard(answer_code: str) -> InlineKeyboardMarkup:
+    rng = random.SystemRandom()
+    target = next(item for item in REPLACE_KEY_CHALLENGE_OPTIONS if item[0] == answer_code)
+    decoys = [item for item in REPLACE_KEY_CHALLENGE_OPTIONS if item[0] != answer_code]
+    options = [target, *rng.sample(decoys, k=2)]
+    rng.shuffle(options)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{emoji} {label}", callback_data=f"{REPLACE_KEY_CHALLENGE_PREFIX}{code}")]
+            for code, label, _, emoji in options
+        ]
+    )
+
+
+async def send_replace_key_challenge(callback: CallbackQuery) -> None:
+    target = random.SystemRandom().choice(REPLACE_KEY_CHALLENGE_OPTIONS)
+    REPLACE_KEY_CHALLENGES[callback.from_user.id] = target[0]
+    await callback.message.answer(
+        f"Перед заменой sub выберите: <b>{target[2]}</b>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=replace_key_challenge_keyboard(target[0]),
+    )
+    await callback.answer()
+
+
+async def record_message_action(message: Message, action: str) -> None:
+    if message.from_user is None:
+        return
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
+        await record_user_action(session, user, action)
+        await session.commit()
+
+
+async def record_callback_action(callback: CallbackQuery, action: str) -> None:
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        await record_user_action(session, user, action)
+        await session.commit()
 
 
 async def current_user(message: Message):
@@ -342,6 +405,29 @@ async def subscription(message: Message, bot: Bot) -> None:
 
 @router.callback_query(F.data == "replace_key")
 async def replace_key(callback: CallbackQuery) -> None:
+    await record_callback_action(callback, "replace_key")
+    await send_replace_key_challenge(callback)
+
+
+@router.callback_query(F.data.startswith(REPLACE_KEY_CHALLENGE_PREFIX))
+async def replace_key_challenge(callback: CallbackQuery) -> None:
+    selected = callback.data.removeprefix(REPLACE_KEY_CHALLENGE_PREFIX)
+    expected = REPLACE_KEY_CHALLENGES.pop(callback.from_user.id, None)
+    if expected is None:
+        await callback.answer("Проверка устарела. Нажмите «Заменить sub» ещё раз.", show_alert=True)
+        return
+    if selected != expected:
+        await callback.answer("Не та кнопка. Нажмите «Заменить sub» и попробуйте ещё раз.", show_alert=True)
+        return
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await replace_key_after_challenge(callback)
+
+
+async def replace_key_after_challenge(callback: CallbackQuery) -> None:
     async with SessionLocal() as session:
         user = await get_or_create_user(
             session,
@@ -352,7 +438,16 @@ async def replace_key(callback: CallbackQuery) -> None:
         try:
             key = await replace_active_private_key(session, user)
             subscription_obj = await get_active_subscription(session, user.id)
+            await record_user_action(session, user, "replace_key_success")
             await session.commit()
+        except RuntimeError as exc:
+            await session.rollback()
+            logging.exception("Failed to replace key for telegram_id=%s", callback.from_user.id)
+            if "SUBSCRIPTION_BASE_URL" in str(exc):
+                await callback.answer("Замена на Germany не настроена: SUBSCRIPTION_BASE_URL пустой.", show_alert=True)
+            else:
+                await callback.answer("Не получилось заменить sub. Напишите в поддержку.", show_alert=True)
+            return
         except Exception:
             await session.rollback()
             logging.exception("Failed to replace key for telegram_id=%s", callback.from_user.id)
@@ -365,6 +460,7 @@ async def replace_key(callback: CallbackQuery) -> None:
 
 @router.message((F.text == kb.BUY) | (F.text == "Купить пакет") | (F.text == kb.EXTEND))
 async def buy(message: Message) -> None:
+    await record_message_action(message, "buy")
     _, admin = await current_user(message)
     async with SessionLocal() as session:
         plans = (
@@ -388,6 +484,7 @@ async def show_plans(callback: CallbackQuery) -> None:
             first_name=callback.from_user.first_name,
         )
         admin = await is_admin(session, user.telegram_id)
+        await record_user_action(session, user, "buy")
         plans = (
             await session.scalars(select(Plan).where(Plan.is_active.is_(True)).order_by(Plan.price_rub.asc()))
         ).all()
@@ -765,6 +862,7 @@ async def project_policy(message: Message) -> None:
 
 @router.message(F.text == kb.SUPPORT)
 async def support(message: Message) -> None:
+    await record_message_action(message, "support")
     _, admin = await current_user(message)
     await message.answer(support_text(), reply_markup=kb.main_keyboard(admin), parse_mode=ParseMode.HTML)
 

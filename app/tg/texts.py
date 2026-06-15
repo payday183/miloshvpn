@@ -91,7 +91,12 @@ def channel_gate_text() -> str:
 def subscription_title(subscription: Subscription, plan: Plan | None = None) -> str:
     if subscription.plan_code == TRIAL_PLAN_CODE:
         return "Триал"
-    return plan.title if plan is not None else subscription.plan_code
+    if plan is not None:
+        return plan.title
+    return {
+        "basic": "Базовый тариф",
+        "unlimited": "Без ограничений",
+    }.get(subscription.plan_code, subscription.plan_code)
 
 
 def remaining_days_text(subscription: Subscription) -> str:

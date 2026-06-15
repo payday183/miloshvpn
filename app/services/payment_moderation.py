@@ -7,9 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import BotAdmin, Order, Subscription, User, VpnKey
+from app.services.direct_node_admin import release_direct_key_slots
 from app.services.payment_modes import MODERATED_PAYMENT_PROVIDERS
-from app.services.vpn import create_or_extend_subscription, get_active_key, get_active_subscription
-from app.services.x3ui import X3UIClient
+from app.services.vpn import create_or_extend_subscription, get_active_key, get_active_subscription, revoke_key_remote
 from app.timeutils import utcnow
 
 PROVISIONAL_ACCESS_DAYS = 2
@@ -172,11 +172,12 @@ async def revoke_user_access(session: AsyncSession, user_id: int) -> None:
     ).all()
     for key in keys:
         try:
-            await X3UIClient().revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+            await revoke_key_remote(session, key)
         except Exception:
             continue
         key.active = False
         key.revoked_at = now
+        await release_direct_key_slots(session, key, status="rejected")
 
 
 async def expire_unconfirmed_orders(session: AsyncSession, *, limit: int = 100) -> int:

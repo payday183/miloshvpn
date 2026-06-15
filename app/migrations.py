@@ -6,6 +6,18 @@ async def run_lightweight_migrations(conn: AsyncConnection) -> None:
     await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS channel_gate_required BOOLEAN DEFAULT FALSE"))
     await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS channel_gate_completed_at TIMESTAMP WITH TIME ZONE"))
     await conn.execute(text("UPDATE users SET channel_gate_required = FALSE WHERE channel_gate_required IS NULL"))
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS buy_clicks INTEGER DEFAULT 0"))
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS support_clicks INTEGER DEFAULT 0"))
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS replace_key_clicks INTEGER DEFAULT 0"))
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS replace_key_successes INTEGER DEFAULT 0"))
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_buy_clicked_at TIMESTAMP WITH TIME ZONE"))
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_support_clicked_at TIMESTAMP WITH TIME ZONE"))
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_replace_key_clicked_at TIMESTAMP WITH TIME ZONE"))
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS last_replace_key_completed_at TIMESTAMP WITH TIME ZONE"))
+    await conn.execute(text("UPDATE users SET buy_clicks = 0 WHERE buy_clicks IS NULL"))
+    await conn.execute(text("UPDATE users SET support_clicks = 0 WHERE support_clicks IS NULL"))
+    await conn.execute(text("UPDATE users SET replace_key_clicks = 0 WHERE replace_key_clicks IS NULL"))
+    await conn.execute(text("UPDATE users SET replace_key_successes = 0 WHERE replace_key_successes IS NULL"))
     await conn.execute(
         text(
             "CREATE TABLE IF NOT EXISTS referrals ("

@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings, get_settings
-from app.models import DirectInboundSlot, DirectNode, DirectSubscription, DirectUserProfile, User
+from app.models import DirectInboundSlot, DirectNode, DirectSubscription, DirectUserProfile, Subscription, User, VpnKey
 from app.services.x3ui import DEFAULT_REALITY_FLOW, X3UIClient, X3UIError
 from app.timeutils import utcnow
 
@@ -195,9 +195,10 @@ async def run_admin_direct_node_create(session: AsyncSession, admin_user: User) 
             if agent is not None:
                 await agent.ensure_port_free(planned_slot.port)
             slot = await reserve_direct_slot(session, settings, node_config, admin_user, planned_slot)
-            inbound_id = await create_remote_inbound_for_slot(x3ui, settings, node_config, slot, template)
-            created_remote_inbound_ids.append(inbound_id)
-            slot.inbound_id = inbound_id
+            if slot.inbound_id is None:
+                inbound_id = await create_remote_inbound_for_slot(x3ui, settings, node_config, slot, template)
+                created_remote_inbound_ids.append(inbound_id)
+                slot.inbound_id = inbound_id
             slot.updated_at = utcnow()
             if agent is not None:
                 await agent.open_port(planned_slot.port)
@@ -264,6 +265,365 @@ async def run_admin_direct_node_create(session: AsyncSession, admin_user: User) 
         profiles_count=len(await active_direct_profiles(session, admin_user.id, node_config.node_id)),
         checks=checks,
     )
+
+
+def direct_node_users_enabled(settings: Settings | None = None) -> bool:
+    settings = settings or get_settings()
+    return direct_node_user_provisioning_requested(settings) and bool(settings.subscription_base_url.strip())
+
+
+def direct_node_user_provisioning_requested(settings: Settings | None = None) -> bool:
+    settings = settings or get_settings()
+    return (
+        settings.enable_direct_node_provisioning
+        and settings.node_provisioning_mode == "direct_node"
+        and not settings.dry_run_first
+    )
+
+
+async def create_or_replace_user_direct_key(
+    session: AsyncSession,
+    user: User,
+    subscription: Subscription,
+) -> VpnKey:
+    settings = get_settings()
+    if not direct_node_user_provisioning_requested(settings):
+        raise RuntimeError("Direct-node user provisioning is disabled by env flags")
+    direct_subscription_url(settings, "self-check", public_only=True)
+
+    node_config = await default_user_direct_node_config(session, settings)
+    if node_config is None:
+        raise RuntimeError("Direct-node user node is not configured")
+
+    templates = direct_admin_templates(settings)
+    if settings.admin_test_profiles_count != len(templates):
+        raise RuntimeError("Direct-node profiles count does not match configured templates")
+
+    await upsert_direct_node(session, node_config, status="provisioning")
+    await session.flush()
+
+    x3ui = x3ui_client_for_config(node_config, settings)
+    created_remote_inbound_ids: list[int] = []
+    try:
+        slots_with_templates = await assigned_slots_for_user(session, user.id, node_config.node_id, templates)
+        if len(slots_with_templates) < len(templates):
+            planned_slots = await plan_direct_node_slots(
+                session,
+                settings,
+                node_config,
+                templates,
+                lambda *_: None,
+            )
+            if len(planned_slots) < len(templates):
+                raise RuntimeError("Direct-node port allocator did not return enough slots")
+
+            slots_with_templates = []
+            for planned_slot in planned_slots:
+                template = prepare_direct_template(
+                    next(item for item in templates if item.template_code == planned_slot.template_code)
+                )
+                slot = await reserve_direct_slot(session, settings, node_config, user, planned_slot)
+                if slot.inbound_id is None:
+                    inbound_id = await create_remote_inbound_for_slot(x3ui, settings, node_config, slot, template)
+                    created_remote_inbound_ids.append(inbound_id)
+                    slot.inbound_id = inbound_id
+                slot.updated_at = utcnow()
+                slots_with_templates.append((slot, template))
+
+        direct_email = f"direct_user_{user.id}_{node_config.node_id}"
+        for stale_email in (direct_email, f"direct_admin_{user.id}_{node_config.node_id}"):
+            try:
+                await x3ui.revoke_client(client_uuid="", email=stale_email)
+            except Exception:
+                pass
+
+        provisioned_client = await x3ui.create_subscription_client(
+            email=direct_email,
+            telegram_id=user.telegram_id,
+            expires_at=subscription.expires_at,
+            traffic_gb=subscription.traffic_limit_gb,
+            inbound_ids=[slot.inbound_id for slot, _ in slots_with_templates if slot.inbound_id],
+            limit_ip=settings.x3ui_user_limit_ip,
+        )
+        await revoke_user_direct_or_system_keys(session, user.id, node_config)
+        direct_subscription = await create_or_get_direct_subscription(
+            session,
+            settings,
+            node_config,
+            user,
+            public_only=True,
+        )
+
+        await upsert_direct_profiles_for_client(
+            session,
+            user,
+            node_config=node_config,
+            slots_with_templates=slots_with_templates,
+            provisioned_client=provisioned_client,
+        )
+
+        key = VpnKey(
+            node_id=None,
+            user_id=user.id,
+            subscription_id=subscription.id,
+            key_type="private",
+            x3ui_client_uuid=provisioned_client.client_uuid,
+            x3ui_sub_id=provisioned_client.sub_id,
+            x3ui_inbound_ids=list(provisioned_client.inbound_ids),
+            server_label=direct_server_label(node_config, len(slots_with_templates)),
+            limit_ip=settings.x3ui_user_limit_ip,
+            email=provisioned_client.email,
+            vless_uri=direct_subscription.subscription_url,
+            active=True,
+            created_at=utcnow(),
+            expires_at=subscription.expires_at,
+        )
+        session.add(key)
+        await upsert_direct_node(session, node_config, status="online")
+        await session.flush()
+        return key
+    except Exception:
+        for inbound_id in reversed(created_remote_inbound_ids):
+            try:
+                await delete_x3ui_inbound(x3ui, inbound_id)
+            except Exception:
+                logger.exception("Failed to cleanup user direct-node inbound %s after provisioning error", inbound_id)
+        raise
+
+
+async def default_user_direct_node_config(session: AsyncSession, settings: Settings) -> DirectNodeConfig | None:
+    return await admin_test_node_config(session, settings)
+
+
+async def assigned_slots_for_user(
+    session: AsyncSession,
+    user_id: int,
+    node_id: str,
+    templates: list[DirectProtocolTemplate],
+) -> list[tuple[DirectInboundSlot, DirectProtocolTemplate]]:
+    template_by_code = {template.template_code: template for template in templates}
+    slots = (
+        await session.scalars(
+            select(DirectInboundSlot)
+            .where(
+                DirectInboundSlot.node_id == node_id,
+                DirectInboundSlot.assigned_user_id == user_id,
+                DirectInboundSlot.status == "assigned",
+                DirectInboundSlot.inbound_id.is_not(None),
+            )
+            .order_by(DirectInboundSlot.slot_number)
+            .with_for_update()
+        )
+    ).all()
+    result: list[tuple[DirectInboundSlot, DirectProtocolTemplate]] = []
+    for slot in slots:
+        template = template_by_code.get(slot.template_code)
+        if template is not None:
+            result.append((slot, template))
+    return result
+
+
+async def revoke_user_direct_or_system_keys(
+    session: AsyncSession,
+    user_id: int,
+    node_config: DirectNodeConfig,
+) -> None:
+    keys = (
+        await session.scalars(
+            select(VpnKey)
+            .where(VpnKey.user_id == user_id, VpnKey.key_type == "private", VpnKey.active.is_(True))
+            .with_for_update()
+        )
+    ).all()
+    now = utcnow()
+    for key in keys:
+        try:
+            await revoke_key_remote(session, key, node_config=node_config)
+        finally:
+            key.active = False
+            key.revoked_at = now
+
+
+async def revoke_key_remote(
+    session: AsyncSession,
+    key: VpnKey,
+    *,
+    node_config: DirectNodeConfig | None = None,
+) -> None:
+    if is_direct_vpn_key(key):
+        config = node_config or await direct_node_config_for_key(session, key)
+        if config is None:
+            raise RuntimeError("Direct-node config for key was not found")
+        await x3ui_client_for_config(config).revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+        return
+    await X3UIClient().revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+
+
+def is_direct_vpn_key(key: VpnKey) -> bool:
+    return key.email.startswith(("direct_user_", "direct_admin_")) or "/sub/direct/" in (key.vless_uri or "")
+
+
+async def direct_node_config_for_key(session: AsyncSession, key: VpnKey) -> DirectNodeConfig | None:
+    subscription = await session.scalar(
+        select(DirectSubscription)
+        .where(DirectSubscription.user_id == key.user_id, DirectSubscription.status == "active")
+        .order_by(DirectSubscription.updated_at.desc(), DirectSubscription.id.desc())
+    )
+    if subscription is not None:
+        return await direct_node_config_by_id(session, subscription.node_id)
+    if "_" in key.email:
+        return await direct_node_config_by_id(session, key.email.rsplit("_", 1)[-1])
+    return None
+
+
+async def direct_node_id_for_key(session: AsyncSession, key: VpnKey) -> str | None:
+    subscription = await session.scalar(
+        select(DirectSubscription)
+        .where(DirectSubscription.user_id == key.user_id)
+        .order_by(DirectSubscription.updated_at.desc(), DirectSubscription.id.desc())
+    )
+    if subscription is not None:
+        return subscription.node_id
+    if "_" in key.email:
+        return key.email.rsplit("_", 1)[-1]
+    return None
+
+
+async def release_direct_key_slots(
+    session: AsyncSession,
+    key: VpnKey,
+    *,
+    status: str = "expired",
+    release_slots: bool = True,
+    delete_remote_inbounds: bool = False,
+) -> None:
+    if not is_direct_vpn_key(key):
+        return
+    node_id = await direct_node_id_for_key(session, key)
+    if node_id is None:
+        return
+
+    now = utcnow()
+    subscriptions = (
+        await session.scalars(
+            select(DirectSubscription).where(
+                DirectSubscription.user_id == key.user_id,
+                DirectSubscription.node_id == node_id,
+                DirectSubscription.status == "active",
+            )
+        )
+    ).all()
+    for subscription in subscriptions:
+        subscription.status = status
+        subscription.updated_at = now
+
+    profiles = (
+        await session.scalars(
+            select(DirectUserProfile)
+            .where(
+                DirectUserProfile.user_id == key.user_id,
+                DirectUserProfile.node_id == node_id,
+                DirectUserProfile.status == "active",
+            )
+            .with_for_update()
+        )
+    ).all()
+    slot_ids = [profile.inbound_slot_id for profile in profiles]
+    for profile in profiles:
+        profile.status = status
+        profile.updated_at = now
+
+    if slot_ids and (release_slots or delete_remote_inbounds):
+        slots = (
+            await session.scalars(
+                select(DirectInboundSlot)
+                .where(
+                    DirectInboundSlot.id.in_(slot_ids),
+                    DirectInboundSlot.assigned_user_id == key.user_id,
+                    DirectInboundSlot.status == "assigned",
+                )
+                .with_for_update()
+            )
+        ).all()
+        x3ui = None
+        if delete_remote_inbounds:
+            config = await direct_node_config_by_id(session, node_id)
+            if config is None:
+                raise RuntimeError("Direct-node config for key slots was not found")
+            x3ui = x3ui_client_for_config(config)
+        for slot in slots:
+            if delete_remote_inbounds and slot.inbound_id is not None and x3ui is not None:
+                await delete_x3ui_inbound(x3ui, slot.inbound_id)
+                slot.inbound_id = None
+            if release_slots:
+                slot.status = "free"
+                slot.assigned_user_id = None
+            slot.updated_at = now
+
+    await session.flush()
+
+
+async def direct_node_config_by_id(session: AsyncSession, node_id: str) -> DirectNodeConfig | None:
+    settings = get_settings()
+    env_config = env_direct_node_config(settings)
+    if node_id == env_config.node_id:
+        return env_config
+    node = await session.get(DirectNode, node_id)
+    return db_direct_node_config(node) if node is not None else None
+
+
+async def upsert_direct_profiles_for_client(
+    session: AsyncSession,
+    user: User,
+    *,
+    node_config: DirectNodeConfig,
+    slots_with_templates: list[tuple[DirectInboundSlot, DirectProtocolTemplate]],
+    provisioned_client,
+) -> None:
+    existing_profiles = {
+        profile.inbound_slot_id: profile
+        for profile in await active_direct_profiles(session, user.id, node_config.node_id)
+    }
+    for slot, template in slots_with_templates:
+        public_link = direct_link_for_slot(slot, provisioned_client.links, node_config)
+        if public_link is None:
+            if template.x3ui_protocol != "vless":
+                raise X3UIError(f"3x-ui did not return a subscription link for inbound {slot.inbound_id}")
+            public_link = build_public_link(
+                get_settings(),
+                node_config,
+                slot,
+                template,
+                provisioned_client.client_uuid,
+                provisioned_client.client_uuid,
+            )
+
+        profile = existing_profiles.get(slot.id)
+        if profile is None:
+            await save_direct_profile(
+                session,
+                user,
+                slot=slot,
+                template=template,
+                client_id=provisioned_client.client_uuid,
+                secret_value=provisioned_client.client_uuid,
+                public_link=public_link,
+            )
+            continue
+        profile.template_code = template.template_code
+        profile.protocol = template.protocol
+        profile.inbound_id = slot.inbound_id
+        profile.port = slot.port
+        profile.client_id = provisioned_client.client_uuid
+        profile.uuid_or_password = provisioned_client.client_uuid
+        profile.public_link = public_link
+        profile.status = "active"
+        profile.updated_at = utcnow()
+    await session.flush()
+
+
+def direct_server_label(node_config: DirectNodeConfig, profiles_count: int) -> str:
+    return "MiloshVPN"
 
 
 def env_direct_node_config(settings: Settings | None = None) -> DirectNodeConfig:
@@ -1086,9 +1446,19 @@ async def create_or_get_direct_subscription(
     settings: Settings,
     node_config: DirectNodeConfig,
     user: User,
+    *,
+    public_only: bool = False,
 ) -> DirectSubscription:
     existing = await active_direct_subscription(session, user.id, node_config.node_id)
     if existing is not None:
+        existing.status = "active"
+        existing.subscription_url = direct_subscription_url(
+            settings,
+            existing.subscription_token,
+            public_only=public_only,
+        )
+        existing.updated_at = utcnow()
+        await session.flush()
         return existing
 
     now = utcnow()
@@ -1097,7 +1467,7 @@ async def create_or_get_direct_subscription(
         user_id=user.id,
         node_id=node_config.node_id,
         subscription_token=token,
-        subscription_url=direct_subscription_url(settings, token),
+        subscription_url=direct_subscription_url(settings, token, public_only=public_only),
         status="active",
         created_at=now,
         updated_at=now,
@@ -1107,10 +1477,16 @@ async def create_or_get_direct_subscription(
     return subscription
 
 
-def direct_subscription_url(settings: Settings, token: str) -> str:
-    base = settings.subscription_base_url.strip() or settings.admin_panel_url or f"http://localhost:{settings.app_port}/admin"
+def direct_subscription_url(settings: Settings, token: str, *, public_only: bool = False) -> str:
+    base = settings.subscription_base_url.strip()
+    if not base and not public_only:
+        base = settings.admin_panel_url or f"http://localhost:{settings.app_port}/admin"
+    if not base:
+        raise RuntimeError("SUBSCRIPTION_BASE_URL is required for user direct-node subscriptions")
     parsed = urlsplit(base)
     if not parsed.scheme or not parsed.netloc:
+        if public_only:
+            raise RuntimeError("SUBSCRIPTION_BASE_URL must be an absolute public URL")
         base = f"http://localhost:{settings.app_port}"
         parsed = urlsplit(base)
     origin = urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))

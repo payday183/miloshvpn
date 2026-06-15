@@ -53,8 +53,7 @@ async def revoke_user_private_keys(session: AsyncSession, user_id: int) -> None:
     ).all()
     now = utcnow()
     for key in keys:
-        x3ui = X3UIClient()
-        await x3ui.revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+        await revoke_key_remote(session, key)
         key.active = False
         key.revoked_at = now
 
@@ -85,8 +84,7 @@ async def revoke_private_key(session: AsyncSession, key_id: int) -> VpnKey | Non
     if key is None:
         return None
 
-    x3ui = X3UIClient()
-    await x3ui.revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+    await revoke_key_remote(session, key)
     key.active = False
     key.revoked_at = utcnow()
     return key
@@ -94,6 +92,11 @@ async def revoke_private_key(session: AsyncSession, key_id: int) -> VpnKey | Non
 
 async def create_private_key(session: AsyncSession, user: User, subscription: Subscription) -> VpnKey:
     settings = get_settings()
+    from app.services.direct_node_admin import create_or_replace_user_direct_key, direct_node_user_provisioning_requested
+
+    if direct_node_user_provisioning_requested(settings):
+        return await create_or_replace_user_direct_key(session, user, subscription)
+
     selection = await select_inbounds_for_client("user")
 
     await revoke_user_private_keys(session, user.id)
@@ -165,12 +168,7 @@ async def extend_active_subscription_days(session: AsyncSession, user_id: int, d
         )
     ).all()
     for key in keys:
-        await X3UIClient().update_client_expiry(
-            client_uuid=key.x3ui_client_uuid,
-            email=key.email,
-            expires_at=subscription.expires_at,
-            inbound_ids=key.x3ui_inbound_ids or None,
-        )
+        await update_key_expiry_remote(session, key, subscription.expires_at)
         key.expires_at = subscription.expires_at
 
     await session.flush()
@@ -245,3 +243,34 @@ async def create_or_extend_subscription(session: AsyncSession, user: User, plan_
     await session.flush()
     await create_private_key(session, user, subscription)
     return subscription
+
+
+async def revoke_key_remote(session: AsyncSession, key: VpnKey) -> None:
+    from app.services.direct_node_admin import is_direct_vpn_key, revoke_key_remote as revoke_direct_key_remote
+
+    if is_direct_vpn_key(key):
+        await revoke_direct_key_remote(session, key)
+        return
+    await X3UIClient().revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+
+
+async def update_key_expiry_remote(session: AsyncSession, key: VpnKey, expires_at) -> None:
+    from app.services.direct_node_admin import direct_node_config_for_key, is_direct_vpn_key, x3ui_client_for_config
+
+    if is_direct_vpn_key(key):
+        config = await direct_node_config_for_key(session, key)
+        if config is None:
+            raise RuntimeError("Direct-node config for key was not found")
+        await x3ui_client_for_config(config).update_client_expiry(
+            client_uuid=key.x3ui_client_uuid,
+            email=key.email,
+            expires_at=expires_at,
+            inbound_ids=key.x3ui_inbound_ids or None,
+        )
+        return
+    await X3UIClient().update_client_expiry(
+        client_uuid=key.x3ui_client_uuid,
+        email=key.email,
+        expires_at=expires_at,
+        inbound_ids=key.x3ui_inbound_ids or None,
+    )
