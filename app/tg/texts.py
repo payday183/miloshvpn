@@ -32,9 +32,6 @@ def profile_text(
     subscription: Subscription | None,
     key: VpnKey | None,
     plan: Plan | None = None,
-    *,
-    referral_url: str = "",
-    referral_count: int = 0,
 ) -> str:
     username = f"@{escape(user.username)}" if user.username else "не указан"
     lines = [
@@ -52,14 +49,6 @@ def profile_text(
     lines.append(
         f"\n\n💎 Моя подписка: <b>{escape(title)}</b>\n"
     )
-    if referral_url:
-        safe_referral_url = escape(referral_url)
-        lines.append(
-            "\nРеферальная ссылка: посоветуй другу — получи +3 дня\n"
-            f"<code>{safe_referral_url}</code>\n"
-            "\n"
-            f"Число рефералов: <b>{referral_count}</b>\n"
-        )
 
     lines.append(
         f"\nСтарт: {subscription.starts_at:%d.%m.%Y %H:%M UTC}\n"
@@ -76,6 +65,27 @@ def profile_text(
     else:
         lines.append("\n\n🔑 Ключ пока не выдан. Открой /start или напиши в поддержку.")
     return "".join(lines)
+
+
+def referral_text(referral_url: str, referral_count: int) -> str:
+    if not referral_url:
+        return (
+            "🤝 Пригласить друга\n\n"
+            "Реферальная ссылка пока недоступна: у бота не задан username. Напишите в поддержку."
+        )
+
+    return (
+        "🤝 Пригласить друга\n\n"
+        "Посоветуй MiloshVPN другу — после его первого старта, подписки на канал и проверки "
+        "тебе автоматически добавится <b>+3 дня</b> к активной подписке.\n\n"
+        f"Число рефералов: <b>{referral_count}</b>\n\n"
+        "Твоя ссылка:\n"
+        f"<code>{escape(referral_url)}</code>"
+    )
+
+
+def referral_copy_text(referral_url: str) -> str:
+    return f"📋 Ссылка для копирования:\n<code>{escape(referral_url)}</code>"
 
 
 def channel_gate_text() -> str:

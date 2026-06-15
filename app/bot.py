@@ -89,6 +89,8 @@ from app.tg.texts import (
     payment_text,
     payment_success_text,
     policy_text,
+    referral_copy_text,
+    referral_text,
     plans_text,
     profile_text,
     start_text,
@@ -115,6 +117,16 @@ REPLACE_KEY_CHALLENGE_OPTIONS: tuple[tuple[str, str, str, str], ...] = (
     ("lion", "Лев", "льва", "🦁"),
     ("panda", "Панда", "панду", "🐼"),
 )
+
+
+def text_in(values: tuple[str, ...]):
+    choices = set(values)
+    return F.text.func(lambda text: text in choices)
+
+
+async def refresh_main_menu_for_legacy_button(message: Message, admin: bool, values: tuple[str, ...]) -> None:
+    if message.text in values:
+        await message.answer("Меню обновлено.", reply_markup=kb.main_keyboard(admin))
 
 
 class PendingFastReviewFilter(BaseFilter):
@@ -290,9 +302,10 @@ async def start(message: Message) -> None:
     )
 
 
-@router.message(F.text == kb.PROFILE)
-async def profile(message: Message, bot: Bot) -> None:
+@router.message(text_in(kb.PROFILE_TEXTS))
+async def profile(message: Message) -> None:
     user, admin = await current_user(message)
+    await refresh_main_menu_for_legacy_button(message, admin, (kb.PROFILE_LEGACY,))
     if should_show_channel_gate(user, admin):
         await message.answer(
             channel_gate_text(),
@@ -305,24 +318,36 @@ async def profile(message: Message, bot: Bot) -> None:
         subscription_obj = await get_active_subscription(session, user.id)
         plan = await session.get(Plan, subscription_obj.plan_code) if subscription_obj is not None else None
         key = await get_active_key(session, user.id)
-        referral = await referral_profile_for_user(session, user, bot_username=await referral_bot_username(bot))
     reply_markup = profile_reply_markup(user, admin, subscription_obj, key)
     await message.answer(
-        profile_text(
-            user,
-            subscription_obj,
-            key,
-            plan,
-            referral_url=referral.url,
-            referral_count=referral.credited_count,
-        ),
+        profile_text(user, subscription_obj, key, plan),
         reply_markup=reply_markup,
         parse_mode=ParseMode.HTML,
     )
 
 
+@router.message(text_in(kb.REFERRALS_TEXTS))
+async def referrals(message: Message, bot: Bot) -> None:
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
+        admin = await is_admin(session, user.telegram_id)
+        referral = await referral_profile_for_user(session, user, bot_username=await referral_bot_username(bot))
+        await session.commit()
+
+    await message.answer(
+        referral_text(referral.url, referral.credited_count),
+        reply_markup=kb.referral_keyboard() if referral.url else kb.main_keyboard(admin),
+        parse_mode=ParseMode.HTML,
+    )
+
+
 @router.callback_query(F.data == kb.CHANNEL_GATE_SUBSCRIBED)
-async def channel_gate_subscribed(callback: CallbackQuery, bot: Bot) -> None:
+async def channel_gate_subscribed(callback: CallbackQuery) -> None:
     async with SessionLocal() as session:
         user = await get_or_create_user(
             session,
@@ -358,46 +383,51 @@ async def channel_gate_subscribed(callback: CallbackQuery, bot: Bot) -> None:
         subscription_obj = await get_active_subscription(session, user.id)
         plan = await session.get(Plan, subscription_obj.plan_code) if subscription_obj is not None else None
         key = await get_active_key(session, user.id)
-        referral = await referral_profile_for_user(session, user, bot_username=await referral_bot_username(bot))
 
     reply_markup = profile_reply_markup(user, admin, subscription_obj, key)
     await callback.message.answer(
-        profile_text(
-            user,
-            subscription_obj,
-            key,
-            plan,
-            referral_url=referral.url,
-            referral_count=referral.credited_count,
-        ),
+        profile_text(user, subscription_obj, key, plan),
         reply_markup=reply_markup,
         parse_mode=ParseMode.HTML,
     )
     await callback.answer("Готово")
 
 
-@router.message((F.text == kb.SUBSCRIPTION) | (F.text == kb.FREE_KEY))
-async def subscription(message: Message, bot: Bot) -> None:
+@router.callback_query(F.data == kb.REFERRAL_COPY)
+async def referral_copy(callback: CallbackQuery, bot: Bot) -> None:
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        referral = await referral_profile_for_user(session, user, bot_username=await referral_bot_username(bot))
+        await session.commit()
+
+    if not referral.url:
+        await callback.answer("Ссылка пока недоступна: у бота не задан username.", show_alert=True)
+        return
+
+    await callback.message.answer(referral_copy_text(referral.url), parse_mode=ParseMode.HTML)
+    await callback.answer("Ссылка отправлена")
+
+
+@router.message(text_in((*kb.SUBSCRIPTION_TEXTS, *kb.FREE_KEY_TEXTS)))
+async def subscription(message: Message) -> None:
     user, admin = await current_user(message)
+    await refresh_main_menu_for_legacy_button(message, admin, (*kb.SUBSCRIPTION_TEXTS[1:], *kb.FREE_KEY_TEXTS[1:]))
     async with SessionLocal() as session:
         subscription_obj = await get_active_subscription(session, user.id)
         plan = await session.get(Plan, subscription_obj.plan_code) if subscription_obj is not None else None
         key = await get_active_key(session, user.id)
-        referral = await referral_profile_for_user(session, user, bot_username=await referral_bot_username(bot))
     reply_markup = (
         kb.profile_actions_keyboard(include_replace=True)
         if subscription_obj is not None and key is not None
         else kb.main_keyboard(admin)
     )
     await message.answer(
-        profile_text(
-            user,
-            subscription_obj,
-            key,
-            plan,
-            referral_url=referral.url,
-            referral_count=referral.credited_count,
-        ),
+        profile_text(user, subscription_obj, key, plan),
         reply_markup=reply_markup,
         parse_mode=ParseMode.HTML,
     )
@@ -458,10 +488,11 @@ async def replace_key_after_challenge(callback: CallbackQuery) -> None:
     await callback.answer("Sub заменён")
 
 
-@router.message((F.text == kb.BUY) | (F.text == "Купить пакет") | (F.text == kb.EXTEND))
+@router.message(text_in((*kb.BUY_TEXTS, *kb.EXTEND_TEXTS)))
 async def buy(message: Message) -> None:
     await record_message_action(message, "buy")
     _, admin = await current_user(message)
+    await refresh_main_menu_for_legacy_button(message, admin, (*kb.BUY_TEXTS[1:], *kb.EXTEND_TEXTS[1:]))
     async with SessionLocal() as session:
         plans = (
             await session.scalars(select(Plan).where(Plan.is_active.is_(True)).order_by(Plan.price_rub.asc()))
@@ -848,26 +879,26 @@ async def run_fast_review(message: Message, bot: Bot, raw_payload: str) -> None:
     )
 
 
-@router.message(F.text == kb.HELP)
+@router.message(text_in(kb.HELP_TEXTS))
 async def help_text(message: Message) -> None:
     _, admin = await current_user(message)
     await message.answer(instruction_text(), reply_markup=kb.main_keyboard(admin), parse_mode=ParseMode.HTML)
 
 
-@router.message(F.text == kb.POLICY)
+@router.message(text_in(kb.POLICY_TEXTS))
 async def project_policy(message: Message) -> None:
     _, admin = await current_user(message)
     await message.answer(policy_text(), reply_markup=kb.main_keyboard(admin), parse_mode=ParseMode.HTML)
 
 
-@router.message(F.text == kb.SUPPORT)
+@router.message(text_in(kb.SUPPORT_TEXTS))
 async def support(message: Message) -> None:
     await record_message_action(message, "support")
     _, admin = await current_user(message)
     await message.answer(support_text(), reply_markup=kb.main_keyboard(admin), parse_mode=ParseMode.HTML)
 
 
-@router.message(F.text == kb.ADMIN)
+@router.message(text_in(kb.ADMIN_TEXTS))
 async def admin_panel(message: Message) -> None:
     user, admin = await current_user(message)
     if not admin:
@@ -876,7 +907,7 @@ async def admin_panel(message: Message) -> None:
     await message.answer(admin_help_text(), reply_markup=kb.admin_keyboard(), parse_mode=ParseMode.HTML)
 
 
-@router.message(F.text == kb.ADMIN_REVIEW_ORDERS)
+@router.message(text_in(kb.ADMIN_REVIEW_ORDERS_TEXTS))
 async def admin_review_orders_menu(message: Message) -> None:
     _, admin = await current_user(message)
     if not admin:
@@ -973,7 +1004,7 @@ async def admin_review_fast(callback: CallbackQuery) -> None:
     await callback.answer("Жду txt")
 
 
-@router.message(F.text == kb.ADMIN_PAYMENT_MODE)
+@router.message(text_in(kb.ADMIN_PAYMENT_MODE_TEXTS))
 async def admin_payment_mode(message: Message) -> None:
     _, admin = await current_user(message)
     if not admin:
@@ -1043,14 +1074,14 @@ async def admin_payment_mode_cancel(callback: CallbackQuery) -> None:
     await callback.message.answer("Ок, систему оплаты не меняю.", reply_markup=kb.admin_keyboard())
 
 
-@router.message(F.text == kb.ADMIN_MAIN_MENU)
+@router.message(text_in(kb.ADMIN_MAIN_MENU_TEXTS))
 async def back_to_main_menu(message: Message) -> None:
     _, admin = await current_user(message)
     await message.answer("Готово, возвращаю обычное меню.", reply_markup=kb.main_keyboard(admin))
 
 
 @router.message(Command("admin_key"))
-@router.message(F.text == kb.ADMIN_CREATE_KEY)
+@router.message(text_in(kb.ADMIN_CREATE_KEY_TEXTS))
 async def create_admin_key_command(message: Message) -> None:
     _, admin = await current_user(message)
     if not admin:
@@ -1100,7 +1131,7 @@ async def create_admin_reality_key_command(message: Message) -> None:
 
 
 @router.message(Command("admin_direct_node_audit"))
-@router.message(F.text == kb.ADMIN_DIRECT_NODE_AUDIT)
+@router.message(text_in(kb.ADMIN_DIRECT_NODE_AUDIT_TEXTS))
 async def admin_direct_node_audit_command(message: Message) -> None:
     _, admin = await current_user(message)
     if not admin:
@@ -1123,7 +1154,7 @@ async def admin_direct_node_audit_command(message: Message) -> None:
 
 
 @router.message(Command("admin_direct_node_create"))
-@router.message(F.text == kb.ADMIN_DIRECT_NODE_CREATE)
+@router.message(text_in(kb.ADMIN_DIRECT_NODE_CREATE_TEXTS))
 async def admin_direct_node_create_command(message: Message) -> None:
     _, admin = await current_user(message)
     if not admin:
@@ -1342,7 +1373,7 @@ async def admin_find_order_command(message: Message) -> None:
     await send_admin_order_search_results(message, parts[1].strip())
 
 
-@router.message(F.text == kb.ADMIN_FIND_ORDER)
+@router.message(text_in(kb.ADMIN_FIND_ORDER_TEXTS))
 async def admin_find_order_prompt(message: Message) -> None:
     _, admin = await current_user(message)
     if not admin:
@@ -1416,7 +1447,7 @@ async def admin_grant_order(callback: CallbackQuery, bot: Bot) -> None:
     await callback.answer("Готово")
 
 
-@router.message(F.text == kb.ADMIN_KEYS)
+@router.message(text_in(kb.ADMIN_KEYS_TEXTS))
 async def admin_private_keys(message: Message) -> None:
     _, admin = await current_user(message)
     if not admin:
@@ -1477,7 +1508,7 @@ async def admin_revoke_private_key(callback: CallbackQuery) -> None:
     await callback.answer("Удалено")
 
 
-@router.message(F.text == kb.ADMIN_STATS)
+@router.message(text_in(kb.ADMIN_STATS_TEXTS))
 async def admin_stats(message: Message) -> None:
     _, admin = await current_user(message)
     if not admin:
@@ -1495,7 +1526,7 @@ async def admin_stats(message: Message) -> None:
     )
 
 
-@router.message(F.text == kb.ADMIN_PENDING)
+@router.message(text_in(kb.ADMIN_PENDING_TEXTS))
 async def pending_orders(message: Message) -> None:
     _, admin = await current_user(message)
     if not admin:
@@ -1508,7 +1539,7 @@ async def pending_orders(message: Message) -> None:
 
 
 @router.message(Command("rotate_free"))
-@router.message(F.text == kb.ADMIN_ROTATE_FREE)
+@router.message(text_in(kb.ADMIN_ROTATE_FREE_TEXTS))
 async def rotate_free(message: Message) -> None:
     _, admin = await current_user(message)
     if not admin:
@@ -1519,7 +1550,7 @@ async def rotate_free(message: Message) -> None:
 
 
 @router.message(Command("post_free"))
-@router.message(F.text == kb.ADMIN_POST_FREE)
+@router.message(text_in(kb.ADMIN_POST_FREE_TEXTS))
 async def post_free(message: Message, bot: Bot) -> None:
     _, admin = await current_user(message)
     if not admin:
