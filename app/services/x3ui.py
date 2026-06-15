@@ -175,6 +175,7 @@ class X3UIClient:
         email: str | None,
         expires_at: datetime,
         inbound_ids: Sequence[int] | None = None,
+        limit_ip: int | None = None,
     ) -> None:
         if self.target.mode == "mock":
             return
@@ -210,6 +211,8 @@ class X3UIClient:
                 if email:
                     updated_settings["email"] = self._string_value(updated_settings.get("email")) or email
                 updated_settings["expiryTime"] = expiry_ms
+                if limit_ip is not None:
+                    updated_settings["limitIp"] = max(0, int(limit_ip))
 
                 await self._update_inbound_client(client, inbound_id, client_uuid, updated_settings)
                 updated += 1

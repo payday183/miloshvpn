@@ -258,6 +258,7 @@ async def update_key_expiry_remote(session: AsyncSession, key: VpnKey, expires_a
     from app.services.direct_node_admin import direct_node_config_for_key, is_direct_vpn_key, x3ui_client_for_config
 
     if is_direct_vpn_key(key):
+        settings = get_settings()
         config = await direct_node_config_for_key(session, key)
         if config is None:
             raise RuntimeError("Direct-node config for key was not found")
@@ -266,7 +267,9 @@ async def update_key_expiry_remote(session: AsyncSession, key: VpnKey, expires_a
             email=key.email,
             expires_at=expires_at,
             inbound_ids=key.x3ui_inbound_ids or None,
+            limit_ip=settings.direct_node_user_limit_ip,
         )
+        key.limit_ip = settings.direct_node_user_limit_ip
         return
     await X3UIClient().update_client_expiry(
         client_uuid=key.x3ui_client_uuid,

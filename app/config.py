@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     x3ui_user_limit_ip: int = 2
     x3ui_admin_limit_ip: int = 1
     x3ui_public_limit_ip: int = 0
+    direct_node_user_limit_ip: int = 0
     node_selection_mode: Literal["active", "least_loaded"] = "least_loaded"
     node_overload_cpu_percent: int = 85
     node_overload_memory_percent: int = 90

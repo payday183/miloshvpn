@@ -343,7 +343,7 @@ async def create_or_replace_user_direct_key(
             expires_at=subscription.expires_at,
             traffic_gb=subscription.traffic_limit_gb,
             inbound_ids=[slot.inbound_id for slot, _ in slots_with_templates if slot.inbound_id],
-            limit_ip=settings.x3ui_user_limit_ip,
+            limit_ip=settings.direct_node_user_limit_ip,
         )
         await revoke_user_direct_or_system_keys(session, user.id, node_config)
         direct_subscription = await create_or_get_direct_subscription(
@@ -371,7 +371,7 @@ async def create_or_replace_user_direct_key(
             x3ui_sub_id=provisioned_client.sub_id,
             x3ui_inbound_ids=list(provisioned_client.inbound_ids),
             server_label=direct_server_label(node_config, len(slots_with_templates)),
-            limit_ip=settings.x3ui_user_limit_ip,
+            limit_ip=settings.direct_node_user_limit_ip,
             email=provisioned_client.email,
             vless_uri=direct_subscription.subscription_url,
             active=True,
