@@ -96,12 +96,16 @@ async def revoke_private_key(session: AsyncSession, key_id: int) -> VpnKey | Non
 
 async def create_private_key(session: AsyncSession, user: User, subscription: Subscription) -> VpnKey:
     settings = get_settings()
-    from app.services.direct_node_admin import create_or_replace_user_direct_key, direct_node_user_provisioning_requested
+    from app.services.direct_node_admin import create_or_replace_user_direct_key
 
-    if direct_node_user_provisioning_requested(settings):
-        return await create_or_replace_user_direct_key(session, user, subscription)
-
-    return await create_system_private_key(session, user, subscription)
+    if settings.x3ui_mode == "mock":
+        return await create_system_private_key(session, user, subscription)
+    return await create_or_replace_user_direct_key(
+        session,
+        user,
+        subscription,
+        require_flags=False,
+    )
 
 
 async def create_system_private_key(
@@ -165,25 +169,16 @@ async def replace_active_private_key(session: AsyncSession, user: User) -> VpnKe
     for candidate in candidates:
         savepoint = await session.begin_nested()
         try:
-            if candidate["name"] == "france":
-                new_key = await create_system_private_key(
-                    session,
-                    user,
-                    subscription,
-                    selection=candidate["selection"],
-                    revoke_existing=False,
-                )
-            else:
-                from app.services.direct_node_admin import create_or_replace_user_direct_key
+            from app.services.direct_node_admin import create_or_replace_user_direct_key
 
-                new_key = await create_or_replace_user_direct_key(
-                    session,
-                    user,
-                    subscription,
-                    node_config=candidate["config"],
-                    require_flags=False,
-                    revoke_existing=False,
-                )
+            new_key = await create_or_replace_user_direct_key(
+                session,
+                user,
+                subscription,
+                node_config=candidate["config"],
+                require_flags=False,
+                revoke_existing=False,
+            )
             await savepoint.commit()
             selected_backend = str(candidate["name"])
             break
@@ -195,82 +190,62 @@ async def replace_active_private_key(session: AsyncSession, user: User) -> VpnKe
     if new_key is None:
         raise RuntimeError("No VPN server accepted replacement: " + "; ".join(errors))
 
-    current_backend = key_backend_name(current_key)
+    current_backend = await key_backend_name(session, current_key)
     now = utcnow()
-    if current_backend == selected_backend:
-        current_key.revoked_at = now + timedelta(seconds=KEY_ROTATION_GRACE_SECONDS)
+    try:
+        await revoke_key_remote(session, current_key)
+    except Exception:
+        current_key.revoked_at = now
+        logger.exception("Immediate old-key cleanup failed; scheduled for retry: key_id=%s", current_key.id)
     else:
-        try:
-            await revoke_key_remote(session, current_key)
-        except Exception:
-            # Keep it remotely usable until the worker retries the cleanup.
-            current_key.revoked_at = now
-            logger.exception("Immediate old-key cleanup failed; scheduled for retry: key_id=%s", current_key.id)
-        else:
-            current_key.active = False
-            current_key.revoked_at = now
+        current_key.active = False
+        current_key.revoked_at = now
+        if current_backend != selected_backend:
             await release_slots_after_backend_move(session, current_key, new_key)
 
     await session.flush()
     return new_key
 
 
-def key_backend_name(key: VpnKey) -> str:
-    from app.services.direct_node_admin import is_direct_vpn_key
+async def key_backend_name(session: AsyncSession, key: VpnKey) -> str:
+    from app.services.direct_node_admin import direct_node_id_for_key, is_direct_vpn_key
 
-    return "germany" if is_direct_vpn_key(key) else "france"
+    if not is_direct_vpn_key(key):
+        return "system"
+    return await direct_node_id_for_key(session, key) or "direct"
 
 
 async def replacement_backend_candidates(session: AsyncSession, current_key: VpnKey) -> list[dict[str, object]]:
-    from app.services.direct_node_admin import default_user_direct_node_config, x3ui_client_for_config
+    from app.services.direct_node_admin import list_direct_node_configs, x3ui_client_for_config
 
     candidates: list[dict[str, object]] = []
     errors: list[str] = []
 
-    try:
-        selection = await select_inbounds_for_client("user")
-        france_load = int(
-            await session.scalar(
-                select(func.count(func.distinct(VpnKey.user_id))).where(
-                    VpnKey.active.is_(True),
-                    VpnKey.key_type == "private",
-                    VpnKey.user_id.is_not(None),
-                    VpnKey.email.like("milosh_%"),
+    settings = get_settings()
+    for config in await list_direct_node_configs(session):
+        if not config.api_base_url.strip() or not (config.public_host.strip() or config.public_ip.strip()):
+            continue
+        try:
+            await x3ui_client_for_config(config, settings).list_inbounds()
+            load = int(
+                await session.scalar(
+                    select(func.count(func.distinct(VpnKey.user_id))).where(
+                        VpnKey.active.is_(True),
+                        VpnKey.key_type == "private",
+                        VpnKey.user_id.is_not(None),
+                        VpnKey.email.like(f"direct_user_%_{config.node_id}"),
+                    )
                 )
+                or 0
             )
-            or 0
-        )
-        candidates.append({"name": "france", "load": france_load, "selection": selection})
-    except Exception as exc:
-        errors.append(f"france: {str(exc)[:160]}")
-
-    try:
-        settings = get_settings()
-        config = await default_user_direct_node_config(session, settings)
-        if config is None:
-            raise RuntimeError("Germany direct-node config was not found")
-        inbounds = await x3ui_client_for_config(config, settings).list_inbounds()
-        if not inbounds:
-            raise RuntimeError("Germany 3x-ui has no inbounds")
-        germany_load = int(
-            await session.scalar(
-                select(func.count(func.distinct(VpnKey.user_id))).where(
-                    VpnKey.active.is_(True),
-                    VpnKey.key_type == "private",
-                    VpnKey.user_id.is_not(None),
-                    VpnKey.email.like("direct_user_%"),
-                )
-            )
-            or 0
-        )
-        candidates.append({"name": "germany", "load": germany_load, "config": config})
-    except Exception as exc:
-        errors.append(f"germany: {str(exc)[:160]}")
+            candidates.append({"name": config.node_id, "load": load, "config": config})
+        except Exception as exc:
+            errors.append(f"{config.node_id}: {str(exc)[:160]}")
 
     if not candidates:
         raise RuntimeError("No healthy VPN servers: " + "; ".join(errors))
 
-    current_backend = key_backend_name(current_key)
+    current_backend = await key_backend_name(session, current_key)
     return sorted(candidates, key=lambda item: (int(item["load"]), item["name"] == current_backend, str(item["name"])))
 
 

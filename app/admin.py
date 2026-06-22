@@ -61,7 +61,7 @@ from app.services.stats import collect_stats
 from app.services.system_x3ui import collect_system_x3ui_state
 from app.services.vpn import (
     create_or_extend_subscription,
-    create_system_private_key,
+    create_private_key,
     get_active_subscription,
     list_active_private_keys,
     revoke_key_remote,
@@ -295,7 +295,7 @@ async def admin_issue_user_key_action(
                 raise RuntimeError("выберите тариф: у пользователя нет активной подписки")
 
         if node_id == SYSTEM_NODE_AUTO:
-            key = await create_system_private_key(session, user, subscription)
+            key = await create_private_key(session, user, subscription)
         else:
             node_config = await direct_node_config_by_id(session, node_id)
             if node_config is None:
@@ -2505,10 +2505,13 @@ def direct_node_issue_options(nodes: list[DirectNodeConfig]) -> str:
     available = [
         node
         for node in nodes
-        if node.node_id and node.api_base_url and node.api_username and node.api_password and (node.public_host or node.public_ip)
+        if node.node_id
+        and node.api_base_url
+        and (node.api_token or (node.api_username and node.api_password))
+        and (node.public_host or node.public_ip)
     ]
     options = [
-        f'<option value="{SYSTEM_NODE_AUTO}">Авто — самый свободный основной сервер</option>'
+        f'<option value="{SYSTEM_NODE_AUTO}">Авто — самый свободный direct-node сервер</option>'
     ]
     options.extend(
         f'<option value="{escape(node.node_id)}">{escape(node.country_flag)} {escape(node.name)} ({escape(node.country_code)}, {escape(node.node_id)})</option>'
@@ -2710,7 +2713,11 @@ def render_direct_nodes_page(
 
 
 def render_direct_node_row(node: DirectNodeConfig) -> str:
-    api_state = "задано" if node.api_base_url and node.api_username and node.api_password else "неполно"
+    api_state = (
+        "задано"
+        if node.api_base_url and (node.api_token or (node.api_username and node.api_password))
+        else "неполно"
+    )
     agent_state = "задан" if node.agent_url else "не задан"
     public = node.public_host or node.public_ip
     return f"""<tr>
@@ -2749,6 +2756,7 @@ def direct_node_form_fields(config: DirectNodeConfig) -> str:
           <label>3x-ui URL<input name="api_base_url" value="{escape(config.api_base_url)}" placeholder="https://host/panel-path"></label>
           <label>3x-ui username<input name="api_username" value="{escape(config.api_username)}"></label>
           <label>3x-ui password<input type="password" name="api_password" value="{escape(config.api_password)}"></label>
+          <label>3x-ui API token<input type="password" name="api_token" value="{escape(config.api_token)}"></label>
           <label>3x-ui verify TLS<select name="api_verify_tls">{bool_options(config.api_verify_tls)}</select></label>
           <label>3x-ui timeout seconds<input name="api_timeout_seconds" value="{config.api_timeout_seconds}" inputmode="numeric"></label>
           <label>Agent URL<input name="agent_url" value="{escape(config.agent_url)}" placeholder="https://node-agent.example.com"></label>
@@ -2780,6 +2788,7 @@ def default_direct_node_form() -> DirectNodeConfig:
         api_base_url=settings.node_de_1_3xui_base_url,
         api_username=settings.node_de_1_3xui_username,
         api_password="",
+        api_token="",
         api_verify_tls=settings.node_de_1_3xui_verify_tls,
         api_timeout_seconds=settings.node_de_1_3xui_timeout_seconds,
         agent_url=settings.node_de_1_agent_url,
@@ -2807,6 +2816,7 @@ def direct_node_config_from_form(form: object) -> DirectNodeConfig:
         api_base_url=text("api_base_url"),
         api_username=text("api_username"),
         api_password=text("api_password"),
+        api_token=text("api_token"),
         api_verify_tls=parse_bool(text("api_verify_tls")),
         api_timeout_seconds=parse_positive_int(text("api_timeout_seconds"), 20),
         agent_url=text("agent_url"),

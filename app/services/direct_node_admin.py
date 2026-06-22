@@ -1,5 +1,5 @@
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 from html import escape
 import base64
 import json
@@ -96,6 +96,7 @@ class DirectNodeConfig:
     api_base_url: str
     api_username: str
     api_password: str
+    api_token: str
     api_verify_tls: bool
     api_timeout_seconds: int
     agent_url: str
@@ -284,11 +285,16 @@ def direct_node_user_provisioning_requested(settings: Settings | None = None) ->
 async def create_or_replace_user_direct_key(
     session: AsyncSession,
     user: User,
-    subscription: Subscription,
+    subscription: Subscription | None,
     *,
     node_config: DirectNodeConfig | None = None,
     require_flags: bool = True,
     revoke_existing: bool = True,
+    key_type: str = "private",
+    email_prefix: str = "direct_user",
+    limit_ip: int | None = None,
+    expires_at: datetime | None = None,
+    traffic_gb: int | None = None,
 ) -> VpnKey:
     settings = get_settings()
     if require_flags and not direct_node_user_provisioning_requested(settings):
@@ -335,7 +341,7 @@ async def create_or_replace_user_direct_key(
                 slot.updated_at = utcnow()
                 slots_with_templates.append((slot, template))
 
-        direct_email = f"direct_user_{user.id}_{uuid4().hex[:8]}_{node_config.node_id}"
+        direct_email = f"{email_prefix}_{user.id}_{uuid4().hex[:8]}_{node_config.node_id}"
         if revoke_existing:
             for stale_email in (
                 f"direct_user_{user.id}_{node_config.node_id}",
@@ -346,16 +352,23 @@ async def create_or_replace_user_direct_key(
                 except Exception:
                     pass
 
+        effective_expires_at = subscription.expires_at if subscription is not None else expires_at
+        effective_traffic_gb = subscription.traffic_limit_gb if subscription is not None else traffic_gb
         provisioned_client = await x3ui.create_subscription_client(
             email=direct_email,
             telegram_id=user.telegram_id,
-            expires_at=subscription.expires_at,
-            traffic_gb=subscription.traffic_limit_gb,
+            expires_at=effective_expires_at,
+            traffic_gb=effective_traffic_gb,
             inbound_ids=[slot.inbound_id for slot, _ in slots_with_templates if slot.inbound_id],
-            limit_ip=settings.direct_node_user_limit_ip,
+            limit_ip=settings.direct_node_user_limit_ip if limit_ip is None else limit_ip,
         )
         if revoke_existing:
-            await revoke_user_direct_or_system_keys(session, user.id, node_config)
+            if key_type == "admin":
+                await revoke_user_admin_keys_for_node(session, user.id, node_config)
+            elif key_type == "public":
+                await revoke_active_public_keys(session)
+            else:
+                await revoke_user_direct_or_system_keys(session, user.id, node_config)
         direct_subscription = await create_or_get_direct_subscription(
             session,
             settings,
@@ -375,18 +388,18 @@ async def create_or_replace_user_direct_key(
         key = VpnKey(
             node_id=None,
             user_id=user.id,
-            subscription_id=subscription.id,
-            key_type="private",
+            subscription_id=subscription.id if subscription is not None else None,
+            key_type=key_type,
             x3ui_client_uuid=provisioned_client.client_uuid,
             x3ui_sub_id=provisioned_client.sub_id,
             x3ui_inbound_ids=list(provisioned_client.inbound_ids),
             server_label=direct_server_label(node_config, len(slots_with_templates)),
-            limit_ip=settings.direct_node_user_limit_ip,
+            limit_ip=settings.direct_node_user_limit_ip if limit_ip is None else limit_ip,
             email=provisioned_client.email,
             vless_uri=direct_subscription.subscription_url,
             active=True,
             created_at=utcnow(),
-            expires_at=subscription.expires_at,
+            expires_at=effective_expires_at,
         )
         session.add(key)
         await upsert_direct_node(session, node_config, status="online")
@@ -409,8 +422,49 @@ async def create_or_replace_user_direct_key(
         raise
 
 
+async def create_or_replace_admin_direct_key(
+    session: AsyncSession,
+    user: User,
+    node_config: DirectNodeConfig,
+) -> VpnKey:
+    settings = get_settings()
+    return await create_or_replace_user_direct_key(
+        session,
+        user,
+        None,
+        node_config=node_config,
+        require_flags=False,
+        revoke_existing=True,
+        key_type="admin",
+        email_prefix="direct_admin",
+        limit_ip=settings.x3ui_admin_limit_ip,
+    )
+
+
 async def default_user_direct_node_config(session: AsyncSession, settings: Settings) -> DirectNodeConfig | None:
-    return await admin_test_node_config(session, settings)
+    configs = [
+        config
+        for config in await list_direct_node_configs(session)
+        if config.api_base_url.strip()
+        and (config.api_token.strip() or (config.api_username.strip() and config.api_password.strip()))
+        and (config.public_host.strip() or config.public_ip.strip())
+        and config.status != "offline"
+    ]
+    if not configs:
+        return None
+
+    assigned = (
+        await session.execute(
+            select(DirectInboundSlot.node_id, DirectInboundSlot.assigned_user_id).where(
+                DirectInboundSlot.status == "assigned",
+                DirectInboundSlot.assigned_user_id.is_not(None),
+            )
+        )
+    ).all()
+    users_by_node: dict[str, set[int]] = {}
+    for node_id, user_id in assigned:
+        users_by_node.setdefault(str(node_id), set()).add(int(user_id))
+    return min(configs, key=lambda item: (len(users_by_node.get(item.node_id, set())), item.node_id))
 
 
 async def assigned_slots_for_user(
@@ -455,6 +509,52 @@ async def revoke_user_direct_or_system_keys(
     ).all()
     now = utcnow()
     for key in keys:
+        try:
+            await revoke_key_remote(session, key)
+        finally:
+            key.active = False
+            key.revoked_at = now
+
+
+async def revoke_active_public_keys(session: AsyncSession) -> None:
+    keys = (
+        await session.scalars(
+            select(VpnKey).where(VpnKey.key_type == "public", VpnKey.active.is_(True)).with_for_update()
+        )
+    ).all()
+    now = utcnow()
+    for key in keys:
+        try:
+            await revoke_key_remote(session, key)
+        finally:
+            key.active = False
+            key.revoked_at = now
+
+
+async def revoke_user_admin_keys_for_node(
+    session: AsyncSession,
+    user_id: int,
+    node_config: DirectNodeConfig,
+) -> None:
+    keys = (
+        await session.scalars(
+            select(VpnKey)
+            .where(VpnKey.user_id == user_id, VpnKey.key_type == "admin", VpnKey.active.is_(True))
+            .with_for_update()
+        )
+    ).all()
+    now = utcnow()
+    for key in keys:
+        same_direct_node = key.email.startswith("direct_admin_") and (
+            await direct_node_id_for_key(session, key) == node_config.node_id
+        )
+        legacy_local_admin = (
+            node_config.country_code.upper() == "NL"
+            and key.email.startswith("milosh_admin_")
+            and not key.email.startswith("milosh_admin_reality_")
+        )
+        if not same_direct_node and not legacy_local_admin:
+            continue
         try:
             await revoke_key_remote(session, key)
         finally:
@@ -663,6 +763,7 @@ def env_direct_node_config(settings: Settings | None = None) -> DirectNodeConfig
         api_base_url=settings.node_de_1_3xui_base_url,
         api_username=settings.node_de_1_3xui_username,
         api_password=settings.node_de_1_3xui_password,
+        api_token="",
         api_verify_tls=settings.node_de_1_3xui_verify_tls,
         api_timeout_seconds=settings.node_de_1_3xui_timeout_seconds,
         agent_url=settings.node_de_1_agent_url,
@@ -687,6 +788,7 @@ def db_direct_node_config(node: DirectNode) -> DirectNodeConfig:
         api_base_url=node.api_base_url,
         api_username=node.api_username,
         api_password=node.api_password,
+        api_token=node.api_token,
         api_verify_tls=node.api_verify_tls,
         api_timeout_seconds=node.api_timeout_seconds,
         agent_url=node.agent_url,
@@ -701,10 +803,10 @@ def db_direct_node_config(node: DirectNode) -> DirectNodeConfig:
 
 
 async def list_direct_node_configs(session: AsyncSession) -> list[DirectNodeConfig]:
-    configs = [env_direct_node_config()]
+    configs_by_id = {env_direct_node_config().node_id: env_direct_node_config()}
     nodes = (await session.scalars(select(DirectNode).order_by(DirectNode.id))).all()
-    configs.extend(db_direct_node_config(node) for node in nodes)
-    return configs
+    configs_by_id.update((node.id, db_direct_node_config(node)) for node in nodes)
+    return list(configs_by_id.values())
 
 
 async def admin_test_node_config(session: AsyncSession, settings: Settings) -> DirectNodeConfig | None:
@@ -724,8 +826,8 @@ async def check_direct_node_connection(config: DirectNodeConfig) -> list[DirectN
 
     if not config.api_base_url.strip():
         add("error", "3x-ui URL", "не задан")
-    if not config.api_username.strip() or not config.api_password.strip():
-        add("error", "3x-ui auth", "username/password не заданы")
+    if not config.api_token.strip() and (not config.api_username.strip() or not config.api_password.strip()):
+        add("error", "3x-ui auth", "token или username/password не заданы")
     if config.vpn_port_min > config.vpn_port_max:
         add("error", "port range", "min больше max")
     else:
@@ -765,6 +867,7 @@ async def save_direct_node_config(session: AsyncSession, config: DirectNodeConfi
             api_base_url=config.api_base_url,
             api_username=config.api_username,
             api_password=config.api_password,
+            api_token=config.api_token,
             api_verify_tls=config.api_verify_tls,
             api_timeout_seconds=config.api_timeout_seconds,
             agent_url=config.agent_url,
@@ -789,6 +892,7 @@ async def save_direct_node_config(session: AsyncSession, config: DirectNodeConfi
         node.api_base_url = config.api_base_url
         node.api_username = config.api_username
         node.api_password = config.api_password
+        node.api_token = config.api_token
         node.api_verify_tls = config.api_verify_tls
         node.api_timeout_seconds = config.api_timeout_seconds
         node.agent_url = config.agent_url
@@ -1127,6 +1231,7 @@ async def upsert_direct_node(session: AsyncSession, config: DirectNodeConfig, *,
             api_base_url=config.api_base_url,
             api_username=config.api_username,
             api_password=config.api_password,
+            api_token=config.api_token,
             api_verify_tls=config.api_verify_tls,
             api_timeout_seconds=config.api_timeout_seconds,
             agent_url=config.agent_url,
@@ -1151,6 +1256,7 @@ async def upsert_direct_node(session: AsyncSession, config: DirectNodeConfig, *,
         node.api_base_url = config.api_base_url
         node.api_username = config.api_username
         node.api_password = config.api_password
+        node.api_token = config.api_token
         node.api_verify_tls = config.api_verify_tls
         node.api_timeout_seconds = config.api_timeout_seconds
         node.agent_url = config.agent_url
@@ -1618,6 +1724,7 @@ def x3ui_client_for_config(config: DirectNodeConfig, settings: Settings | None =
             "x3ui_web_base_path": web_base_path,
             "x3ui_username": config.api_username,
             "x3ui_password": config.api_password,
+            "x3ui_api_token": config.api_token,
             "my_3x_ui_login": "",
             "my_3x_ui_password": "",
             "x3ui_tls_verify": config.api_verify_tls,

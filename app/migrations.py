@@ -45,6 +45,7 @@ async def run_lightweight_migrations(conn: AsyncConnection) -> None:
             "api_base_url VARCHAR(512) NOT NULL, "
             "api_username VARCHAR(255) NOT NULL DEFAULT '', "
             "api_password VARCHAR(255) NOT NULL DEFAULT '', "
+            "api_token VARCHAR(512) NOT NULL DEFAULT '', "
             "api_verify_tls BOOLEAN NOT NULL DEFAULT FALSE, "
             "api_timeout_seconds INTEGER NOT NULL DEFAULT 20, "
             "agent_url VARCHAR(512) NOT NULL, "
@@ -64,6 +65,7 @@ async def run_lightweight_migrations(conn: AsyncConnection) -> None:
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_nodes_country_code ON direct_nodes (country_code)"))
     await conn.execute(text("ALTER TABLE direct_nodes ADD COLUMN IF NOT EXISTS api_username VARCHAR(255) NOT NULL DEFAULT ''"))
     await conn.execute(text("ALTER TABLE direct_nodes ADD COLUMN IF NOT EXISTS api_password VARCHAR(255) NOT NULL DEFAULT ''"))
+    await conn.execute(text("ALTER TABLE direct_nodes ADD COLUMN IF NOT EXISTS api_token VARCHAR(512) NOT NULL DEFAULT ''"))
     await conn.execute(text("ALTER TABLE direct_nodes ADD COLUMN IF NOT EXISTS api_verify_tls BOOLEAN NOT NULL DEFAULT FALSE"))
     await conn.execute(text("ALTER TABLE direct_nodes ADD COLUMN IF NOT EXISTS api_timeout_seconds INTEGER NOT NULL DEFAULT 20"))
     await conn.execute(text("ALTER TABLE direct_nodes ADD COLUMN IF NOT EXISTS agent_token VARCHAR(255) NOT NULL DEFAULT ''"))

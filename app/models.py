@@ -101,6 +101,7 @@ class DirectNode(Base):
     api_base_url: Mapped[str] = mapped_column(String(512))
     api_username: Mapped[str] = mapped_column(String(255), default="")
     api_password: Mapped[str] = mapped_column(String(255), default="")
+    api_token: Mapped[str] = mapped_column(String(512), default="")
     api_verify_tls: Mapped[bool] = mapped_column(Boolean, default=False)
     api_timeout_seconds: Mapped[int] = mapped_column(Integer, default=20)
     agent_url: Mapped[str] = mapped_column(String(512))

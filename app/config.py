@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     x3ui_timeout_seconds: int = 20
     x3ui_username: str = "admin"
     x3ui_password: str = "admin"
+    x3ui_api_token: str = ""
     my_3x_ui_login: str = ""
     my_3x_ui_password: str = ""
     x3ui_inbound_id: int = 1
@@ -88,6 +89,7 @@ class Settings(BaseSettings):
     admin_test_country_flag: str = "🇩🇪"
     admin_test_create_sub: bool = False
     admin_test_profiles_count: int = 5
+    admin_direct_node_id: str = ""
 
     subscription_mode: str = "single_sub_with_5_profiles"
     subscription_title_template: str = "🇩🇪 Germany Test {user_id}"

@@ -8,9 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import PublicKeyPostTemplate, Setting, VpnKey
-from app.services.system_x3ui import select_inbounds_for_client
-from app.services.x3ui import X3UIClient
+from app.models import PublicKeyPostTemplate, Setting, User, VpnKey
 from app.timeutils import utcnow
 
 PUBLIC_KEY_LAST_POSTED_AT = "public_key_last_posted_at"
@@ -19,6 +17,7 @@ PUBLIC_KEY_LIFETIME_HOURS = 24
 PUBLIC_KEY_POST_INTERVAL_HOURS = 48
 PUBLIC_KEY_TRAFFIC_GB = 500
 PUBLIC_KEY_TIMEZONE = ZoneInfo("Europe/Moscow")
+PUBLIC_KEY_SERVICE_TELEGRAM_ID = -1000000000001
 
 
 async def get_active_public_key(session: AsyncSession) -> VpnKey | None:
@@ -39,47 +38,36 @@ async def rotate_public_key(session: AsyncSession) -> VpnKey:
     now = utcnow()
     lifetime_hours = _public_key_lifetime_hours(settings)
     traffic_gb = _public_key_traffic_gb(settings)
-    selection = await select_inbounds_for_client("public")
-
-    keys = (
-        await session.scalars(
-            select(VpnKey)
-            .where(VpnKey.key_type == "public", VpnKey.active.is_(True))
-        )
-    ).all()
-    for key in keys:
-        x3ui = X3UIClient(settings)
-        await x3ui.revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
-        key.active = False
-        key.revoked_at = now
-
     expires_at = now + timedelta(hours=lifetime_hours)
-    x3ui = X3UIClient(settings)
-    client = await x3ui.create_subscription_client(
-        email=f"milosh_free_{now:%Y%m%d_%H%M}",
-        telegram_id=None,
+    from app.services.direct_node_admin import create_or_replace_user_direct_key, default_user_direct_node_config
+
+    service_user = await session.scalar(select(User).where(User.telegram_id == PUBLIC_KEY_SERVICE_TELEGRAM_ID))
+    if service_user is None:
+        service_user = User(
+            telegram_id=PUBLIC_KEY_SERVICE_TELEGRAM_ID,
+            username="public_key_service",
+            first_name="Public Key Service",
+            role="service",
+            created_at=now,
+        )
+        session.add(service_user)
+        await session.flush()
+    node_config = await default_user_direct_node_config(session, settings)
+    if node_config is None:
+        raise RuntimeError("No direct node is available for the public key")
+    key = await create_or_replace_user_direct_key(
+        session,
+        service_user,
+        None,
+        node_config=node_config,
+        require_flags=False,
+        revoke_existing=True,
+        key_type="public",
+        email_prefix="direct_public",
+        limit_ip=settings.x3ui_public_limit_ip,
         expires_at=expires_at,
         traffic_gb=traffic_gb,
-        inbound_ids=selection.inbound_ids,
-        limit_ip=settings.x3ui_public_limit_ip,
     )
-    key = VpnKey(
-        node_id=None,
-        user_id=None,
-        subscription_id=None,
-        key_type="public",
-        x3ui_client_uuid=client.client_uuid,
-        x3ui_sub_id=client.sub_id,
-        x3ui_inbound_ids=list(client.inbound_ids),
-        server_label=selection.title,
-        limit_ip=settings.x3ui_public_limit_ip,
-        email=client.email,
-        vless_uri=client.vless_uri,
-        active=True,
-        created_at=now,
-        expires_at=expires_at,
-    )
-    session.add(key)
     await session.commit()
     await session.refresh(key)
     return key
@@ -135,7 +123,9 @@ async def expire_public_keys(session: AsyncSession, *, limit: int = 100) -> dict
     failed_revokes = 0
     for key in keys:
         try:
-            await X3UIClient().revoke_client(client_uuid=key.x3ui_client_uuid, email=key.email)
+            from app.services.vpn import revoke_key_remote
+
+            await revoke_key_remote(session, key)
         except Exception:
             failed_revokes += 1
             continue

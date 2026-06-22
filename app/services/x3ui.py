@@ -45,6 +45,7 @@ class X3UITarget:
     web_base_path: str
     username: str
     password: str
+    api_token: str
     inbound_id: int
     public_host: str
     public_port: int
@@ -965,6 +966,11 @@ class X3UIClient:
         )
 
     async def _login(self, client: httpx.AsyncClient) -> None:
+        if self.target.api_token:
+            client.headers["Authorization"] = f"Bearer {self.target.api_token}"
+            client.headers["X-Requested-With"] = "XMLHttpRequest"
+            return
+
         csrf_token = await self._csrf_token(client)
         client.headers["X-Requested-With"] = "XMLHttpRequest"
         if csrf_token:
@@ -1025,6 +1031,7 @@ class X3UIClient:
             web_base_path=self.settings.x3ui_web_base_path,
             username=self.settings.my_3x_ui_login.strip() or self.settings.x3ui_username,
             password=self.settings.my_3x_ui_password.strip() or self.settings.x3ui_password,
+            api_token=self.settings.x3ui_api_token.strip(),
             inbound_id=self.settings.x3ui_inbound_id,
             public_host=self.settings.vless_public_host,
             public_port=self.settings.vless_public_port,
