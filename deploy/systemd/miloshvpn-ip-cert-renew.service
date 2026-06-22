@@ -1,0 +1,18 @@
+[Unit]
+Description=Renew the MiloshVPN Let's Encrypt IP certificate
+Wants=network-online.target
+After=network-online.target docker.service
+ConditionPathExists=/root/.acme.sh/acme.sh
+StartLimitIntervalSec=1h
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/miloshvpn
+Environment=DEBUG=0
+UMask=0077
+ExecStart=/root/.acme.sh/acme.sh --cron --home /root/.acme.sh
+ExecStartPost=/usr/bin/curl --fail --silent --show-error --max-time 20 https://217.144.189.159/health
+TimeoutStartSec=5min
+Restart=on-failure
+RestartSec=15min
