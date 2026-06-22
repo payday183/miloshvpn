@@ -1,18 +1,32 @@
 from collections import Counter
 from dataclasses import dataclass
+from datetime import timedelta
 from html import escape
+from typing import Any
 from urllib.parse import urlencode
 
 from aiogram import Bot
+from aiogram.enums import ParseMode
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.db import get_session
-from app.models import BotAdmin, DirectUserProfile, Order, Subscription, User, VpnKey
+from app.models import (
+    BotAdmin,
+    DirectUserProfile,
+    Order,
+    Plan,
+    Subscription,
+    SubscriptionReminder,
+    User,
+    UserFeedback,
+    UserKeyActivitySnapshot,
+    VpnKey,
+)
 from app.services.admin_auth import (
     admin_panel_url_with_token,
     verify_admin_profile_signature,
@@ -24,9 +38,14 @@ from app.services.billing import poll_donations
 from app.services.direct_node_admin import (
     DirectNodeConfig,
     check_direct_node_connection,
+    create_or_replace_user_direct_key,
+    direct_node_config_by_id,
+    direct_node_config_for_key,
+    is_direct_vpn_key,
     list_direct_node_configs,
     release_direct_key_slots,
     save_direct_node_config,
+    x3ui_client_for_config,
 )
 from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
 from app.services.manual_orders import ManualOrderError, ManualOrderGrantResult, manually_confirm_order, search_orders_for_admin
@@ -40,10 +59,22 @@ from app.services.payment_modes import (
 from app.services.public_keys import rotate_public_key
 from app.services.stats import collect_stats
 from app.services.system_x3ui import collect_system_x3ui_state
-from app.services.vpn import list_active_private_keys, revoke_key_remote, revoke_private_key
+from app.services.vpn import (
+    create_or_extend_subscription,
+    create_system_private_key,
+    get_active_subscription,
+    list_active_private_keys,
+    revoke_key_remote,
+    revoke_private_key,
+)
+from app.services.x3ui import X3UIClient
+from app.tg.texts import subscription_text
 from app.timeutils import utcnow
 
 router = APIRouter()
+ACTIVITY_SNAPSHOT_THROTTLE_SECONDS = 120
+ACTIVITY_SNAPSHOT_DAYS = 30
+SYSTEM_NODE_AUTO = "system:auto"
 
 
 @dataclass(frozen=True)
@@ -59,6 +90,16 @@ class AdminUserMonitorRow:
     expired_keys: int
     paid_orders: int
     total_orders: int
+    feedback_count: int
+    last_feedback_rating: str
+    last_feedback_at: object | None
+
+
+@dataclass(frozen=True)
+class ActivityRefreshResult:
+    snapshot: UserKeyActivitySnapshot | None
+    created: bool
+    error: str = ""
 
 
 async def require_admin_token(request: Request) -> None:
@@ -142,7 +183,68 @@ async def admin_users_page(
     rows = await admin_user_monitor_rows(session)
     filtered_rows = filter_admin_user_rows(rows, request.query_params)
     sorted_rows = sort_admin_user_rows(filtered_rows, str(request.query_params.get("sort") or "created_desc"))
-    return HTMLResponse(render_admin_users_page(sorted_rows, rows, request, token))
+    page_rows, page, per_page = paginate_admin_user_rows(sorted_rows, request.query_params)
+    nodes = await list_direct_node_configs(session)
+    plans = await admin_issue_plans(session)
+    return HTMLResponse(
+        render_admin_users_page(page_rows, rows, len(sorted_rows), page, per_page, nodes, plans, request, token)
+    )
+
+
+@router.get("/admin/feedback", response_class=HTMLResponse)
+async def admin_feedback_page(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> HTMLResponse:
+    token = request.query_params.get("token", "")
+    feedbacks = await admin_feedback_rows(session)
+    filtered = filter_admin_feedback_rows(feedbacks, request.query_params)
+    return HTMLResponse(render_admin_feedback_page(filtered, feedbacks, request, token))
+
+
+@router.get("/admin/users/{user_id}", response_class=HTMLResponse)
+async def admin_user_detail_page(
+    user_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> HTMLResponse:
+    token = request.query_params.get("token", "")
+    user = await session.scalar(
+        select(User)
+        .options(
+            selectinload(User.subscriptions),
+            selectinload(User.keys),
+            selectinload(User.orders),
+        )
+        .where(User.id == user_id)
+    )
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    row = await admin_user_monitor_row_for_user(session, user)
+    nodes = await list_direct_node_configs(session)
+    plans = await admin_issue_plans(session)
+    direct_profiles = await user_direct_profiles(session, user.id)
+    feedbacks = await user_feedback_rows(session, user.id)
+    activity_result = await refresh_user_activity_snapshot(session, row.key)
+    if activity_result.created:
+        await session.commit()
+    activity_snapshots = await user_activity_snapshots(session, user.id)
+    return HTMLResponse(
+        render_admin_user_detail_page(
+            row,
+            direct_profiles,
+            nodes,
+            plans,
+            feedbacks,
+            activity_snapshots,
+            activity_result,
+            request,
+            token,
+        )
+    )
 
 
 @router.post("/admin/users/{user_id}/delete-access")
@@ -153,6 +255,7 @@ async def admin_delete_user_access_action(
     _: None = Depends(require_admin_token),
 ) -> RedirectResponse:
     form = await request.form()
+    return_to = str(form.get("return_to") or "")
     delete_inbounds = str(form.get("delete_inbounds") or "").lower() in {"1", "true", "on", "yes"}
     result = await delete_user_access(session, user_id, delete_inbounds=delete_inbounds)
     await session.commit()
@@ -162,8 +265,61 @@ async def admin_delete_user_access_action(
         if delete_inbounds
         else f"Ключ удалён: ключей {result['keys']}, inbound-ы оставлены за пользователем"
     )
-    suffix = urlencode({"token": token, "notice": notice}) if token else urlencode({"notice": notice})
-    return RedirectResponse(url=f"/admin/users?{suffix}", status_code=303)
+    if return_to == "detail":
+        return redirect_to_admin_user_detail(user_id, token, notice)
+    return redirect_to_admin_users(token, notice)
+
+
+@router.post("/admin/users/{user_id}/issue-key")
+async def admin_issue_user_key_action(
+    user_id: int,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(require_admin_token),
+) -> RedirectResponse:
+    form = await request.form()
+    return_to = str(form.get("return_to") or "")
+    token = request.query_params.get("token", "")
+    node_id = str(form.get("node_id") or SYSTEM_NODE_AUTO).strip()
+    plan_code = str(form.get("plan_code") or "").strip()
+    user = await session.get(User, user_id)
+    if user is None:
+        return redirect_to_admin_users(token, "Пользователь не найден")
+
+    try:
+        if plan_code:
+            subscription = await create_or_extend_subscription(session, user, plan_code, issue_key=False)
+        else:
+            subscription = await get_active_subscription(session, user.id)
+            if subscription is None:
+                raise RuntimeError("выберите тариф: у пользователя нет активной подписки")
+
+        if node_id == SYSTEM_NODE_AUTO:
+            key = await create_system_private_key(session, user, subscription)
+        else:
+            node_config = await direct_node_config_by_id(session, node_id)
+            if node_config is None:
+                raise RuntimeError("узел не найден")
+            key = await create_or_replace_user_direct_key(
+                session,
+                user,
+                subscription,
+                node_config=node_config,
+                require_flags=False,
+            )
+        await session.commit()
+    except Exception as exc:
+        await session.rollback()
+        notice = f"Ключ не выдан: {str(exc)[:160]}"
+        return redirect_to_admin_user_detail(user_id, token, notice) if return_to == "detail" else redirect_to_admin_users(token, notice)
+
+    notified = await notify_manual_key_from_web(user.telegram_id, subscription, key)
+    notice = (
+        f"Ключ выдан ({subscription.plan_code}) и отправлен пользователю {user.telegram_id}"
+        if notified
+        else f"Ключ выдан ({subscription.plan_code}) пользователю {user.telegram_id}, но Telegram-сообщение не отправилось"
+    )
+    return redirect_to_admin_user_detail(user_id, token, notice) if return_to == "detail" else redirect_to_admin_users(token, notice)
 
 
 @router.post("/admin/direct-nodes/check", response_class=HTMLResponse)
@@ -360,6 +516,25 @@ async def notify_admin_reality_key_from_web(telegram_id: int, key: VpnKey) -> bo
         await bot.session.close()
 
 
+async def notify_manual_key_from_web(telegram_id: int, subscription: Subscription, key: VpnKey) -> bool:
+    settings = get_settings()
+    if not settings.bot_token:
+        return False
+
+    bot = Bot(settings.bot_token)
+    try:
+        await bot.send_message(
+            telegram_id,
+            "🔑 Администратор выдал вам новый sub.\n\n" + subscription_text(subscription, key),
+            parse_mode=ParseMode.HTML,
+        )
+        return True
+    except Exception:
+        return False
+    finally:
+        await bot.session.close()
+
+
 @router.get("/api/admin/subscriptions")
 async def api_subscriptions(
     session: AsyncSession = Depends(get_session),
@@ -380,7 +555,6 @@ async def admin_user_monitor_rows(session: AsyncSession) -> list[AdminUserMonito
                 selectinload(User.orders),
             )
             .order_by(User.created_at.desc())
-            .limit(1000)
         )
     ).all()
 
@@ -392,6 +566,15 @@ async def admin_user_monitor_rows(session: AsyncSession) -> list[AdminUserMonito
     ).all()
     for profile in profiles:
         profile_counts[profile.user_id] += 1
+
+    feedback_counts = Counter()
+    latest_feedback_by_user: dict[int, UserFeedback] = {}
+    feedbacks = (
+        await session.scalars(select(UserFeedback).order_by(UserFeedback.created_at.asc(), UserFeedback.id.asc()))
+    ).all()
+    for feedback in feedbacks:
+        feedback_counts[feedback.user_id] += 1
+        latest_feedback_by_user[feedback.user_id] = feedback
 
     rows: list[AdminUserMonitorRow] = []
     for user in users:
@@ -409,6 +592,7 @@ async def admin_user_monitor_rows(session: AsyncSession) -> list[AdminUserMonito
         inbound_count = len(key.x3ui_inbound_ids or []) if key is not None else 0
         plan_kind = plan_kind_for_subscription(subscription, now)
         key_state = "active" if active_key else "expired" if key is not None else "no_key"
+        latest_feedback = latest_feedback_by_user.get(user.id)
         rows.append(
             AdminUserMonitorRow(
                 user=user,
@@ -422,9 +606,335 @@ async def admin_user_monitor_rows(session: AsyncSession) -> list[AdminUserMonito
                 expired_keys=expired_keys,
                 paid_orders=paid_orders,
                 total_orders=total_orders,
+                feedback_count=feedback_counts[user.id],
+                last_feedback_rating=latest_feedback.rating if latest_feedback and latest_feedback.rating else "",
+                last_feedback_at=latest_feedback.created_at if latest_feedback else None,
             )
         )
     return rows
+
+
+async def admin_user_monitor_row_for_user(session: AsyncSession, user: User) -> AdminUserMonitorRow:
+    now = utcnow()
+    direct_profiles = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(DirectUserProfile)
+            .where(DirectUserProfile.user_id == user.id, DirectUserProfile.status == "active")
+        )
+        or 0
+    )
+    subscription = latest_user_subscription(user, now)
+    key = latest_user_key(user, now)
+    active_key = key is not None and key.active and (key.expires_at is None or key.expires_at > now)
+    expired_keys = sum(
+        1
+        for item in user.keys
+        if item.key_type == "private" and (not item.active or (item.expires_at is not None and item.expires_at <= now))
+    )
+    paid_orders = sum(1 for order in user.orders if order.status == "paid")
+    total_orders = len(user.orders)
+    inbound_count = len(key.x3ui_inbound_ids or []) if key is not None else 0
+    plan_kind = plan_kind_for_subscription(subscription, now)
+    key_state = "active" if active_key else "expired" if key is not None else "no_key"
+    feedback_count = int(
+        await session.scalar(
+            select(func.count()).select_from(UserFeedback).where(UserFeedback.user_id == user.id)
+        )
+        or 0
+    )
+    latest_feedback = await session.scalar(
+        select(UserFeedback).where(UserFeedback.user_id == user.id).order_by(UserFeedback.created_at.desc()).limit(1)
+    )
+    return AdminUserMonitorRow(
+        user=user,
+        subscription=subscription,
+        key=key,
+        plan_kind=plan_kind,
+        key_state=key_state,
+        server_label=key.server_label if key and key.server_label else "нет ключа",
+        direct_profiles=direct_profiles,
+        assigned_inbounds=inbound_count or direct_profiles,
+        expired_keys=expired_keys,
+        paid_orders=paid_orders,
+        total_orders=total_orders,
+        feedback_count=feedback_count,
+        last_feedback_rating=latest_feedback.rating if latest_feedback and latest_feedback.rating else "",
+        last_feedback_at=latest_feedback.created_at if latest_feedback else None,
+    )
+
+
+async def admin_feedback_rows(session: AsyncSession) -> list[UserFeedback]:
+    return list(
+        (
+            await session.scalars(
+                select(UserFeedback)
+                .options(selectinload(UserFeedback.user), selectinload(UserFeedback.subscription))
+                .order_by(UserFeedback.created_at.desc(), UserFeedback.id.desc())
+                .limit(500)
+            )
+        ).all()
+    )
+
+
+async def user_feedback_rows(session: AsyncSession, user_id: int) -> list[UserFeedback]:
+    return list(
+        (
+            await session.scalars(
+                select(UserFeedback)
+                .where(UserFeedback.user_id == user_id)
+                .order_by(UserFeedback.created_at.desc(), UserFeedback.id.desc())
+                .limit(100)
+            )
+        ).all()
+    )
+
+
+def filter_admin_feedback_rows(feedbacks: list[UserFeedback], params) -> list[UserFeedback]:
+    query = str(params.get("q") or "").strip().lower()
+    rating = str(params.get("rating") or "all")
+    filtered = feedbacks
+    if query:
+        matched = []
+        for feedback in filtered:
+            user = feedback.user
+            haystack = " ".join(
+                [
+                    str(user.telegram_id) if user else "",
+                    str(user.id) if user else "",
+                    (user.username or "") if user else "",
+                    (user.first_name or "") if user else "",
+                    feedback.text or "",
+                    feedback.rating or "",
+                ]
+            ).lower()
+            if query in haystack:
+                matched.append(feedback)
+        filtered = matched
+    if rating != "all":
+        filtered = [feedback for feedback in filtered if (feedback.rating or "") == rating]
+    return filtered
+
+
+async def user_direct_profiles(session: AsyncSession, user_id: int) -> list[DirectUserProfile]:
+    return list(
+        (
+            await session.scalars(
+                select(DirectUserProfile)
+                .where(DirectUserProfile.user_id == user_id)
+                .order_by(DirectUserProfile.updated_at.desc(), DirectUserProfile.id.desc())
+            )
+        ).all()
+    )
+
+
+async def user_activity_snapshots(
+    session: AsyncSession,
+    user_id: int,
+    *,
+    days: int = ACTIVITY_SNAPSHOT_DAYS,
+) -> list[UserKeyActivitySnapshot]:
+    since = utcnow() - timedelta(days=days)
+    return list(
+        (
+            await session.scalars(
+                select(UserKeyActivitySnapshot)
+                .where(UserKeyActivitySnapshot.user_id == user_id, UserKeyActivitySnapshot.sampled_at >= since)
+                .order_by(UserKeyActivitySnapshot.sampled_at.asc())
+            )
+        ).all()
+    )
+
+
+async def refresh_user_activity_snapshot(session: AsyncSession, key: VpnKey | None) -> ActivityRefreshResult:
+    if key is None or key.user_id is None or key.key_type != "private":
+        return ActivityRefreshResult(snapshot=None, created=False)
+
+    now = utcnow()
+    latest = await session.scalar(
+        select(UserKeyActivitySnapshot)
+        .where(UserKeyActivitySnapshot.user_id == key.user_id, UserKeyActivitySnapshot.key_id == key.id)
+        .order_by(UserKeyActivitySnapshot.sampled_at.desc())
+        .limit(1)
+    )
+    if latest is not None and latest.sampled_at >= now - timedelta(seconds=ACTIVITY_SNAPSHOT_THROTTLE_SECONDS):
+        return ActivityRefreshResult(snapshot=latest, created=False, error=latest.error or "")
+
+    try:
+        activity = await collect_remote_key_activity(session, key)
+        snapshot = UserKeyActivitySnapshot(
+            user_id=key.user_id,
+            key_id=key.id,
+            node_id=activity["node_id"],
+            sampled_at=now,
+            online=bool(activity["online"]),
+            up_bytes=int(activity["up_bytes"]),
+            down_bytes=int(activity["down_bytes"]),
+            inbound_count=int(activity["inbound_count"]),
+            active_inbounds=int(activity["active_inbounds"]),
+            matched_clients=int(activity["matched_clients"]),
+            source="detail",
+            error=None,
+        )
+    except Exception as exc:
+        snapshot = UserKeyActivitySnapshot(
+            user_id=key.user_id,
+            key_id=key.id,
+            node_id=await key_node_id_for_activity(session, key),
+            sampled_at=now,
+            online=False,
+            up_bytes=0,
+            down_bytes=0,
+            inbound_count=len(key.x3ui_inbound_ids or []),
+            active_inbounds=0,
+            matched_clients=0,
+            source="detail_error",
+            error=str(exc)[:500],
+        )
+
+    session.add(snapshot)
+    await session.flush()
+    return ActivityRefreshResult(snapshot=snapshot, created=True, error=snapshot.error or "")
+
+
+async def collect_remote_key_activity(session: AsyncSession, key: VpnKey) -> dict[str, object]:
+    inbound_ids = tuple(dict.fromkeys(item for item in (int_value(raw) for raw in (key.x3ui_inbound_ids or [])) if item > 0))
+    if is_direct_vpn_key(key):
+        config = await direct_node_config_for_key(session, key)
+        if config is None:
+            raise RuntimeError("Direct-node config for this key was not found")
+        x3ui = x3ui_client_for_config(config)
+        node_id = config.node_id
+    else:
+        x3ui = X3UIClient()
+        node_id = "local"
+
+    inbounds = await x3ui.get_inbounds_by_ids(inbound_ids) if inbound_ids else await x3ui.list_inbounds()
+    activity = extract_key_activity_from_inbounds(inbounds, key, inbound_ids)
+    activity["node_id"] = node_id
+    return activity
+
+
+async def key_node_id_for_activity(session: AsyncSession, key: VpnKey) -> str:
+    if is_direct_vpn_key(key):
+        config = await direct_node_config_for_key(session, key)
+        if config is not None:
+            return config.node_id
+    return "local"
+
+
+def extract_key_activity_from_inbounds(
+    inbounds: list[dict[str, Any]],
+    key: VpnKey,
+    inbound_ids: tuple[int, ...],
+) -> dict[str, object]:
+    wanted_ids = set(inbound_ids)
+    now = utcnow()
+    inbound_count = 0
+    active_inbounds = 0
+    matched_clients = 0
+    up_bytes = 0
+    down_bytes = 0
+    online = False
+
+    for inbound in inbounds:
+        inbound_id = int_value(inbound.get("id"))
+        if wanted_ids and inbound_id not in wanted_ids:
+            continue
+
+        client_settings = find_key_client_payload(X3UIClient._inbound_clients(inbound), key)
+        client_stat = find_key_client_payload(client_stats_from_inbound(inbound), key)
+        if client_settings is None and client_stat is None:
+            continue
+
+        inbound_count += 1
+        matched_clients += 1
+        if client_is_enabled(client_settings, key, now):
+            active_inbounds += 1
+        if client_stat is not None:
+            up_bytes += int_value(client_stat.get("up"))
+            down_bytes += int_value(client_stat.get("down"))
+            online = online or client_stat_is_online(client_stat)
+
+    if not wanted_ids and matched_clients == 0:
+        inbound_count = 0
+
+    return {
+        "online": online,
+        "up_bytes": up_bytes,
+        "down_bytes": down_bytes,
+        "inbound_count": inbound_count,
+        "active_inbounds": active_inbounds,
+        "matched_clients": matched_clients,
+    }
+
+
+def client_stats_from_inbound(inbound: dict[str, Any]) -> list[dict[str, Any]]:
+    stats = inbound.get("clientStats")
+    return [item for item in stats if isinstance(item, dict)] if isinstance(stats, list) else []
+
+
+def find_key_client_payload(payloads: list[dict[str, Any]], key: VpnKey) -> dict[str, Any] | None:
+    for payload in payloads:
+        if payload_matches_key(payload, key):
+            return payload
+    return None
+
+
+def payload_matches_key(payload: dict[str, Any], key: VpnKey) -> bool:
+    email = str_value(payload.get("email") or payload.get("clientEmail") or payload.get("remark"))
+    if email and email == key.email.lower():
+        return True
+    uuid = str_value(payload.get("id") or payload.get("uuid") or payload.get("clientId") or payload.get("clientUuid"))
+    if uuid and uuid == key.x3ui_client_uuid.lower():
+        return True
+    sub_id = str_value(payload.get("subId") or payload.get("sub") or payload.get("subscriptionId"))
+    return bool(sub_id and key.x3ui_sub_id and sub_id == key.x3ui_sub_id.lower())
+
+
+def client_is_enabled(client_settings: dict[str, Any] | None, key: VpnKey, now) -> bool:
+    if client_settings is not None and client_settings.get("enable") is False:
+        return False
+    expiry_ms = int_value((client_settings or {}).get("expiryTime"))
+    if expiry_ms > 0 and expiry_ms <= int(now.timestamp() * 1000):
+        return False
+    if key.expires_at is not None and key.expires_at <= now:
+        return False
+    return key.active
+
+
+def client_stat_is_online(client_stat: dict[str, Any]) -> bool:
+    for key in ("online", "isOnline", "is_online"):
+        value = client_stat.get(key)
+        if isinstance(value, bool):
+            return value
+        if str_value(value) in {"1", "true", "yes", "online"}:
+            return True
+    status = str_value(client_stat.get("status") or client_stat.get("state"))
+    if status in {"online", "connected", "active", "в сети"}:
+        return True
+
+    last_seen = int_value(
+        client_stat.get("lastOnline")
+        or client_stat.get("lastOnlineTime")
+        or client_stat.get("lastSeen")
+        or client_stat.get("lastSeenAt")
+    )
+    if last_seen <= 0:
+        return False
+    last_seen_seconds = last_seen / 1000 if last_seen > 10_000_000_000 else last_seen
+    return utcnow().timestamp() - last_seen_seconds <= 10 * 60
+
+
+def int_value(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def str_value(value: Any) -> str:
+    return str(value or "").strip().lower()
 
 
 def latest_user_subscription(user: User, now) -> Subscription | None:
@@ -498,6 +1008,23 @@ def sort_admin_user_rows(rows: list[AdminUserMonitorRow], sort: str) -> list[Adm
     key = sorters.get(sort, sorters["created_desc"])
     reverse = sort != "expires_asc"
     return sorted(rows, key=key, reverse=reverse)
+
+
+def paginate_admin_user_rows(rows: list[AdminUserMonitorRow], params) -> tuple[list[AdminUserMonitorRow], int, int]:
+    per_page = parse_page_size(str(params.get("per_page") or "50"))
+    total_pages = max(1, (len(rows) + per_page - 1) // per_page)
+    page = parse_positive_int(str(params.get("page") or "1"), 1)
+    page = min(max(1, page), total_pages)
+    start = (page - 1) * per_page
+    return rows[start : start + per_page], page, per_page
+
+
+def parse_page_size(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 50
+    return parsed if parsed in {25, 50, 100} else 50
 
 
 async def delete_user_access(session: AsyncSession, user_id: int, *, delete_inbounds: bool) -> dict[str, int]:
@@ -616,6 +1143,20 @@ def redirect_to_admin(request: Request) -> RedirectResponse:
     token = request.query_params.get("token")
     suffix = f"?{urlencode({'token': token})}" if token else ""
     return RedirectResponse(url=f"/admin{suffix}", status_code=303)
+
+
+def redirect_to_admin_users(token: str, notice: str) -> RedirectResponse:
+    query = {"notice": notice}
+    if token:
+        query["token"] = token
+    return RedirectResponse(url=f"/admin/users?{urlencode(query)}", status_code=303)
+
+
+def redirect_to_admin_user_detail(user_id: int, token: str, notice: str) -> RedirectResponse:
+    query = {"notice": notice}
+    if token:
+        query["token"] = token
+    return RedirectResponse(url=f"/admin/users/{user_id}?{urlencode(query)}", status_code=303)
 
 
 def serialize_subscription(subscription: Subscription, key: VpnKey | None) -> dict[str, object]:
@@ -787,6 +1328,69 @@ def profile_page_css() -> str:
         dl div {
           grid-template-columns: 1fr;
           gap: 4px;
+        }
+      }
+    """
+
+
+def admin_nav(token: str, active: str) -> str:
+    token_qs = f"?{urlencode({'token': token})}" if token else ""
+    items = [
+        ("dashboard", "Главная", f"/admin{token_qs}"),
+        ("users", "Пользователи", f"/admin/users{token_qs}"),
+        ("feedback", "Отзывы", f"/admin/feedback{token_qs}"),
+        ("direct_nodes", "Direct nodes", f"/admin/direct-nodes{token_qs}"),
+    ]
+    links = "\n".join(
+        f'<a class="{"active" if code == active else ""}" href="{escape(url)}">{escape(label)}</a>'
+        for code, label, url in items
+    )
+    return f'<nav class="admin-tabs" aria-label="Admin navigation">{links}</nav>'
+
+
+def admin_nav_css() -> str:
+    return """
+      .admin-tabs {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 16px;
+      }
+      .admin-tabs a {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 38px;
+        padding: 0 12px;
+        border: 1px solid #cad2dc;
+        border-radius: 6px;
+        background: #fff;
+        color: #121417;
+        text-decoration: none;
+        font-size: 14px;
+      }
+      .admin-tabs a.active {
+        border-color: #1563ff;
+        background: #1563ff;
+        color: #fff;
+      }
+      header .admin-tabs a {
+        border-color: #3a424f;
+        background: #20252e;
+        color: #fff;
+      }
+      header .admin-tabs a.active {
+        border-color: #fff;
+        background: #fff;
+        color: #121417;
+      }
+      @media (max-width: 560px) {
+        .admin-tabs {
+          gap: 6px;
+        }
+        .admin-tabs a {
+          flex: 1 1 calc(50% - 6px);
+          padding: 0 10px;
         }
       }
     """
@@ -967,11 +1571,13 @@ def render_admin_page(
       code {{
         word-break: break-all;
       }}
+      {admin_nav_css()}
     </style>
   </head>
   <body>
     <header>
       <h1>MiloshVPN Admin</h1>
+      {admin_nav(token, "dashboard")}
     </header>
     <main>
       <section class="stats">
@@ -1176,6 +1782,11 @@ def render_order_search_page(query: str, orders: list[Order], token: str) -> str
 def render_admin_users_page(
     rows: list[AdminUserMonitorRow],
     all_rows: list[AdminUserMonitorRow],
+    filtered_count: int,
+    page: int,
+    per_page: int,
+    nodes: list[DirectNodeConfig],
+    plans: list[Plan],
     request: Request,
     token: str,
 ) -> str:
@@ -1184,6 +1795,9 @@ def render_admin_users_page(
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     filters = render_admin_user_filters(request, token, all_rows)
     stats = render_admin_user_stats(all_rows)
+    pagination = render_admin_user_pagination(request, token, filtered_count, page, per_page)
+    node_options = direct_node_issue_options(nodes)
+    plan_options = admin_issue_plan_options(plans)
     table_rows = "\n".join(render_admin_user_row(row, token_qs) for row in rows) or table_empty("По фильтрам никого нет")
     return f"""<!doctype html>
 <html lang="ru">
@@ -1199,10 +1813,7 @@ def render_admin_users_page(
         <p class="eyebrow">MiloshVPN Admin</p>
         <h1>Пользователи</h1>
         <p class="muted">Все пользователи, подписки, ключи, direct inbound-ы и действия в боте.</p>
-        <div class="actions">
-          <a class="button secondary" href="/admin{token_qs}">Главная</a>
-          <a class="button secondary" href="/admin/direct-nodes{token_qs}">Direct nodes</a>
-        </div>
+        {admin_nav(token, "users")}
       </section>
 
       <section class="stats">{stats}</section>
@@ -1214,7 +1825,10 @@ def render_admin_users_page(
       </section>
 
       <section class="panel">
-        <h2>Список: {len(rows)} из {len(all_rows)}</h2>
+        <div class="list-head">
+          <h2>Список: {len(rows)} на странице, найдено {filtered_count} из {len(all_rows)}</h2>
+          {pagination}
+        </div>
         <table class="users-table">
           <thead>
             <tr>
@@ -1228,6 +1842,7 @@ def render_admin_users_page(
           </thead>
           <tbody>{table_rows}</tbody>
         </table>
+        {pagination}
       </section>
 
       <dialog id="delete-dialog">
@@ -1245,11 +1860,28 @@ def render_admin_users_page(
           </div>
         </form>
       </dialog>
+
+      <dialog id="issue-key-dialog">
+        <form method="post" id="issue-key-form">
+          <h2>Выдать ключ?</h2>
+          <p id="issue-key-user-label" class="muted"></p>
+          <label>Узел / страна<select name="node_id">{node_options}</select></label>
+          <label>Тариф<select name="plan_code">{plan_options}</select></label>
+          <p class="muted">Можно оставить текущую подписку или сразу назначить выбранный тариф. Бот создаст новый sub и отправит его в Telegram.</p>
+          <div class="actions">
+            <button type="submit">Да, выдать</button>
+            <button class="secondary" type="button" onclick="closeIssueKeyDialog()">Нет</button>
+          </div>
+        </form>
+      </dialog>
     </main>
     <script>
       const dialog = document.getElementById('delete-dialog');
       const form = document.getElementById('delete-form');
       const label = document.getElementById('delete-user-label');
+      const issueDialog = document.getElementById('issue-key-dialog');
+      const issueForm = document.getElementById('issue-key-form');
+      const issueLabel = document.getElementById('issue-key-user-label');
       function openDeleteDialog(button) {{
         form.action = button.dataset.action;
         label.textContent = button.dataset.user;
@@ -1259,9 +1891,134 @@ def render_admin_users_page(
       function closeDeleteDialog() {{
         dialog.close();
       }}
+      function openIssueKeyDialog(button) {{
+        issueForm.action = button.dataset.action;
+        issueLabel.textContent = button.dataset.user;
+        if (issueDialog.showModal) issueDialog.showModal(); else if (confirm('Выдать ключ пользователю?')) issueForm.submit();
+      }}
+      function closeIssueKeyDialog() {{
+        issueDialog.close();
+      }}
     </script>
   </body>
 </html>"""
+
+
+def render_admin_feedback_page(
+    feedbacks: list[UserFeedback],
+    all_feedbacks: list[UserFeedback],
+    request: Request,
+    token: str,
+) -> str:
+    rows = "\n".join(render_admin_feedback_row(feedback, token) for feedback in feedbacks) or table_empty("Отзывов по фильтру нет")
+    filters = render_admin_feedback_filters(request, token)
+    stats = render_admin_feedback_stats(all_feedbacks)
+    return f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Отзывы MiloshVPN</title>
+    <style>{admin_users_page_css()}</style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <p class="eyebrow">MiloshVPN Admin</p>
+        <h1>Отзывы</h1>
+        <p class="muted">Оценки и свободные сообщения пользователей из trial-опросов.</p>
+        {admin_nav(token, "feedback")}
+      </section>
+
+      <section class="stats">{stats}</section>
+
+      <section class="panel">
+        <h2>Фильтры</h2>
+        {filters}
+      </section>
+
+      <section class="panel">
+        <div class="list-head">
+          <h2>Найдено: {len(feedbacks)} из {len(all_feedbacks)}</h2>
+        </div>
+        <table class="users-table">
+          <thead>
+            <tr>
+              <th>Дата</th>
+              <th>Пользователь</th>
+              <th>Оценка</th>
+              <th>Отзыв</th>
+              <th>Источник</th>
+              <th>Админ</th>
+            </tr>
+          </thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </section>
+    </main>
+  </body>
+</html>"""
+
+
+def render_admin_feedback_filters(request: Request, token: str) -> str:
+    params = request.query_params
+    q = str(params.get("q") or "")
+    rating = str(params.get("rating") or "all")
+    return f"""
+        <form method="get" action="/admin/feedback" class="grid filters">
+          {hidden_token_input(token)}
+          <label class="search-field">Поиск<input name="q" value="{escape(q)}" placeholder="@username, Telegram ID, текст"></label>
+          <label>Оценка<select name="rating">{option_tags(feedback_rating_options(), rating)}</select></label>
+          <div class="actions">
+            <button type="submit">Показать</button>
+            <a class="button secondary" href="/admin/feedback{('?' + urlencode({'token': token})) if token else ''}">Сбросить</a>
+          </div>
+        </form>
+    """
+
+
+def render_admin_feedback_stats(feedbacks: list[UserFeedback]) -> str:
+    ratings = Counter(feedback.rating or "empty" for feedback in feedbacks)
+    text_count = sum(1 for feedback in feedbacks if feedback.text)
+    unsent = sum(1 for feedback in feedbacks if feedback.sent_to_admin_at is None)
+    return "\n".join(
+        [
+            render_stat("Всего", len(feedbacks)),
+            render_stat("С текстом", text_count),
+            render_stat("Отлично", ratings["excellent"]),
+            render_stat("Хорошо", ratings["good"]),
+            render_stat("Удовлетворительно", ratings["satisfactory"]),
+            render_stat("Не отправлено админу", unsent),
+        ]
+    )
+
+
+def render_admin_feedback_row(feedback: UserFeedback, token: str) -> str:
+    user = feedback.user
+    token_qs = f"?{urlencode({'token': token})}" if token else ""
+    username = f"@{escape(user.username)}" if user and user.username else "без username"
+    user_link = f"/admin/users/{user.id}{token_qs}" if user else "#"
+    user_id = user.telegram_id if user else feedback.user_id
+    text = escape(feedback.text or "без текста")
+    sent = format_admin_dt(feedback.sent_to_admin_at) if feedback.sent_to_admin_at else "нет"
+    return f"""<tr>
+      <td data-label="Дата">{format_admin_dt(feedback.created_at)}</td>
+      <td data-label="Пользователь"><a class="user-link" href="{escape(user_link)}"><strong>{username}</strong></a><br><code>{user_id}</code></td>
+      <td data-label="Оценка"><span class="badge">{escape(feedback_rating_admin_label(feedback.rating))}</span></td>
+      <td data-label="Отзыв">{text}</td>
+      <td data-label="Источник">{escape(feedback.source)}</td>
+      <td data-label="Админ">{sent}</td>
+    </tr>"""
+
+
+def feedback_rating_options() -> list[tuple[str, str]]:
+    return [
+        ("all", "Все"),
+        ("excellent", "отлично"),
+        ("good", "хорошо"),
+        ("satisfactory", "удовлетворительно"),
+        ("custom", "сам напешууууУ"),
+    ]
 
 
 def render_admin_user_stats(rows: list[AdminUserMonitorRow]) -> str:
@@ -1286,6 +2043,405 @@ def render_admin_user_stats(rows: list[AdminUserMonitorRow]) -> str:
     )
 
 
+def render_admin_user_detail_page(
+    row: AdminUserMonitorRow,
+    direct_profiles: list[DirectUserProfile],
+    nodes: list[DirectNodeConfig],
+    plans: list[Plan],
+    feedbacks: list[UserFeedback],
+    activity_snapshots: list[UserKeyActivitySnapshot],
+    activity_result: ActivityRefreshResult,
+    request: Request,
+    token: str,
+) -> str:
+    user = row.user
+    token_qs = f"?{urlencode({'token': token})}" if token else ""
+    notice = str(request.query_params.get("notice") or "")
+    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    username = f"@{escape(user.username)}" if user.username else "без username"
+    local_activity = key_activity_buckets([key for key in user.keys if key.key_type == "private"])
+    remote_activity = snapshot_activity_buckets(activity_snapshots)
+    remote_hours = sum(float(item["hours"]) for item in remote_activity)
+    remote_days = sum(1 for item in remote_activity if float(item["hours"]) > 0)
+    local_hours = sum(float(item["hours"]) for item in local_activity)
+    local_days = sum(1 for item in local_activity if float(item["hours"]) > 0)
+    activity_hours = remote_hours if activity_snapshots else local_hours
+    activity_days = remote_days if activity_snapshots else local_days
+    activity_days_label = "Активных дней за 30" if activity_snapshots else "Дней с ключом за 30"
+    activity_hours_label = "Активных часов-снимков" if activity_snapshots else "Часов с ключом за 30"
+    node_options = direct_node_issue_options(nodes)
+    plan_options = admin_issue_plan_options(plans)
+    issue_key_url = f"/admin/users/{user.id}/issue-key{token_qs}"
+    delete_url = f"/admin/users/{user.id}/delete-access{token_qs}"
+    subscription_rows = render_detail_subscription_rows(user.subscriptions)
+    key_rows = render_detail_key_rows(user.keys)
+    order_rows = render_detail_order_rows(user.orders)
+    profile_rows = render_detail_profile_rows(direct_profiles)
+    feedback_rows = render_detail_feedback_rows(feedbacks)
+    return f"""<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Пользователь {user.telegram_id}</title>
+    <style>{admin_users_page_css()}</style>
+  </head>
+  <body>
+    <main>
+      <section class="panel">
+        <p class="eyebrow">MiloshVPN Admin</p>
+        <h1>{username}</h1>
+        <p class="muted">Telegram ID: <code>{user.telegram_id}</code> · User ID: <code>{user.id}</code> · создан: {format_admin_dt(user.created_at)}</p>
+        {admin_nav(token, "users")}
+      </section>
+
+      {notice_html}
+
+      <section class="stats">
+        {render_stat(activity_days_label, activity_days)}
+        {render_stat(activity_hours_label, int(round(activity_hours)))}
+        {render_stat("Снимков активности", len(activity_snapshots))}
+        {render_stat("Inbound-ы", row.assigned_inbounds)}
+        {render_stat("Оплаты", row.paid_orders)}
+        {render_stat("Купить", int(user.buy_clicks or 0))}
+        {render_stat("Поддержка", int(user.support_clicks or 0))}
+        {render_stat("Замены", int(user.replace_key_clicks or 0))}
+        {render_stat("Любимая кнопка", favorite_action_text(user))}
+      </section>
+
+      <section class="panel">
+        <h2>Быстрые действия</h2>
+        <div class="actions">
+          <button class="secondary icon-button" type="button" title="Выдать ключ" data-action="{escape(issue_key_url)}" data-user="{username} / {user.telegram_id}" onclick="openIssueKeyDialog(this)">🔑</button>
+          <button class="danger" type="button" data-action="{escape(delete_url)}" data-user="{username} / {user.telegram_id}" onclick="openDeleteDialog(this)">Удалить доступ</button>
+          <a class="button secondary" href="/admin/orders/search{token_qs}{'&' if token_qs else '?'}query={user.telegram_id}">Оплаты</a>
+          <a class="button secondary" href="/admin/users{token_qs}">Назад к списку</a>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Live-статистика ключа</h2>
+        {render_live_activity_status(activity_result, activity_snapshots)}
+      </section>
+
+      <section class="panel">
+        <h2>Активность по снимкам 3x-ui</h2>
+        <p class="muted">Снимок создаётся при открытии этой карточки и не чаще одного раза в 2 минуты по конкретному ключу. Час считается активным, если 3x-ui вернул online или между снимками вырос трафик.</p>
+        {render_key_activity_chart(remote_activity)}
+        <h2 class="subheading">Период действия ключа в БД</h2>
+        <p class="muted">Этот нижний график механически показывает, когда ключ считался действующим в нашей базе.</p>
+        {render_key_activity_chart(local_activity)}
+      </section>
+
+      <section class="panel">
+        <h2>Клики в боте</h2>
+        {render_user_click_details(user)}
+      </section>
+
+      <section class="panel">
+        <h2>Отзывы</h2>
+        <table class="detail-table">{feedback_rows}</table>
+      </section>
+
+      <section class="panel">
+        <h2>Подписки</h2>
+        <table class="detail-table">{subscription_rows}</table>
+      </section>
+
+      <section class="panel">
+        <h2>Ключи</h2>
+        <table class="detail-table">{key_rows}</table>
+      </section>
+
+      <section class="panel">
+        <h2>Direct-профили</h2>
+        <table class="detail-table">{profile_rows}</table>
+      </section>
+
+      <section class="panel">
+        <h2>Заказы</h2>
+        <table class="detail-table">{order_rows}</table>
+      </section>
+
+      {render_user_action_dialogs(user, token_qs, node_options, plan_options, username)}
+    </main>
+    {render_user_action_scripts()}
+  </body>
+</html>"""
+
+
+def key_activity_buckets(keys: list[VpnKey], days: int = 30) -> list[dict[str, object]]:
+    now = utcnow()
+    first_day = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
+    buckets: list[dict[str, object]] = []
+    for index in range(days):
+        day_start = first_day + timedelta(days=index)
+        day_end = min(day_start + timedelta(days=1), now)
+        hours = 0.0
+        active_keys = 0
+        for key in keys:
+            start = key.created_at
+            end = key.revoked_at or key.expires_at or now
+            end = min(end, now)
+            overlap_start = max(start, day_start)
+            overlap_end = min(end, day_end)
+            if overlap_end <= overlap_start:
+                continue
+            hours += (overlap_end - overlap_start).total_seconds() / 3600
+            active_keys += 1
+        buckets.append({"date": day_start.strftime("%d.%m"), "hours": min(hours, 24.0), "keys": active_keys})
+    return buckets
+
+
+def snapshot_activity_buckets(
+    snapshots: list[UserKeyActivitySnapshot],
+    days: int = ACTIVITY_SNAPSHOT_DAYS,
+) -> list[dict[str, object]]:
+    now = utcnow()
+    first_day = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
+    active_hours: set[object] = set()
+    previous: UserKeyActivitySnapshot | None = None
+    for snapshot in sorted(snapshots, key=lambda item: item.sampled_at):
+        if snapshot.sampled_at < first_day:
+            previous = snapshot
+            continue
+        total_bytes = int(snapshot.up_bytes or 0) + int(snapshot.down_bytes or 0)
+        previous_bytes = int(previous.up_bytes or 0) + int(previous.down_bytes or 0) if previous is not None else total_bytes
+        if snapshot.online or (previous is not None and total_bytes > previous_bytes):
+            active_hours.add(snapshot.sampled_at.replace(minute=0, second=0, microsecond=0))
+        previous = snapshot
+    buckets: list[dict[str, object]] = []
+    for index in range(days):
+        day_start = first_day + timedelta(days=index)
+        day_end = min(day_start + timedelta(days=1), now)
+        hours = sum(1 for sampled_hour in active_hours if day_start <= sampled_hour < day_end)
+        samples = sum(1 for snapshot in snapshots if day_start <= snapshot.sampled_at < day_end)
+        buckets.append({"date": day_start.strftime("%d.%m"), "hours": float(hours), "samples": samples})
+    return buckets
+
+
+def render_live_activity_status(
+    activity_result: ActivityRefreshResult,
+    snapshots: list[UserKeyActivitySnapshot],
+) -> str:
+    snapshot = activity_result.snapshot or (snapshots[-1] if snapshots else None)
+    if snapshot is None:
+        return '<p class="muted">Нет активного личного ключа для точечной проверки.</p>'
+
+    online_label = "online" if snapshot.online else "offline"
+    online_class = "active" if snapshot.online else "offline"
+    source_label = "новый снимок" if activity_result.created else "кэш до 2 минут"
+    error_html = f'<p class="error">Последняя проверка: {escape(activity_result.error)}</p>' if activity_result.error else ""
+    return f"""
+        <div class="stats compact-stats">
+          <div class="stat"><span>Статус</span><strong><span class="badge {online_class}">{online_label}</span></strong></div>
+          <div class="stat"><span>Узел</span><strong>{escape(snapshot.node_id or "unknown")}</strong></div>
+          <div class="stat"><span>Inbound-ов ключа</span><strong>{snapshot.inbound_count}</strong></div>
+          <div class="stat"><span>Активных inbound-ов</span><strong>{snapshot.active_inbounds}</strong></div>
+          <div class="stat"><span>Клиентов найдено</span><strong>{snapshot.matched_clients}</strong></div>
+          <div class="stat"><span>Трафик</span><strong>{format_bytes(snapshot.up_bytes + snapshot.down_bytes)}</strong></div>
+        </div>
+        <p class="muted">Снято: {format_admin_dt(snapshot.sampled_at)} · {escape(source_label)}</p>
+        {error_html}
+    """
+
+
+def render_key_activity_chart(activity: list[dict[str, object]]) -> str:
+    if not activity:
+        return '<p class="muted">Данных активности ключа пока нет.</p>'
+    rows = []
+    for item in activity:
+        hours = float(item["hours"])
+        width = max(1, int((hours / 24) * 100)) if hours > 0 else 0
+        rows.append(
+            '<div class="activity-row">'
+            f'<span class="activity-date">{escape(str(item["date"]))}</span>'
+            '<div class="activity-bar-track">'
+            f'<div class="activity-bar" style="width: {width}%"></div>'
+            "</div>"
+            f'<span class="activity-hours">{hours:.1f} ч</span>'
+            "</div>"
+        )
+    return '<div class="activity-chart">' + "\n".join(rows) + "</div>"
+
+
+def favorite_action_text(user: User) -> str:
+    actions = [
+        ("Купить", int(user.buy_clicks or 0)),
+        ("Поддержка", int(user.support_clicks or 0)),
+        ("Замена", int(user.replace_key_clicks or 0)),
+    ]
+    label, count = max(actions, key=lambda item: item[1])
+    return label if count > 0 else "нет"
+
+
+def render_user_click_details(user: User) -> str:
+    rows = [
+        ("Купить", user.buy_clicks, user.last_buy_clicked_at),
+        ("Поддержка", user.support_clicks, user.last_support_clicked_at),
+        ("Замена sub", user.replace_key_clicks, user.last_replace_key_clicked_at),
+        ("Успешная замена", user.replace_key_successes, user.last_replace_key_completed_at),
+    ]
+    items = "\n".join(
+        f'<div class="stat"><span>{escape(label)}</span><strong>{int(count or 0)}</strong><span class="muted">последний раз: {format_admin_dt(last_at)}</span></div>'
+        for label, count, last_at in rows
+    )
+    return f'<div class="stats compact-stats">{items}</div>'
+
+
+def render_detail_feedback_rows(feedbacks: list[UserFeedback]) -> str:
+    if not feedbacks:
+        return table_empty("Отзывов пока нет")
+    rows = ["<thead><tr><th>Дата</th><th>Оценка</th><th>Текст</th><th>Админу</th></tr></thead><tbody>"]
+    for feedback in feedbacks:
+        rows.append(
+            f"<tr><td>{format_admin_dt(feedback.created_at)}</td>"
+            f"<td><span class=\"badge\">{escape(feedback_rating_admin_label(feedback.rating))}</span></td>"
+            f"<td>{escape(feedback.text or 'без текста')}</td>"
+            f"<td>{format_admin_dt(feedback.sent_to_admin_at) if feedback.sent_to_admin_at else 'нет'}</td></tr>"
+        )
+    rows.append("</tbody>")
+    return "\n".join(rows)
+
+
+def render_detail_subscription_rows(subscriptions: list[Subscription]) -> str:
+    ordered = sorted(subscriptions, key=lambda item: item.expires_at, reverse=True)
+    if not ordered:
+        return table_empty("Подписок нет")
+    rows = ["<thead><tr><th>ID</th><th>Тариф</th><th>Статус</th><th>Старт</th><th>Финиш</th><th>Лимит</th></tr></thead><tbody>"]
+    for subscription in ordered:
+        traffic = "без лимита" if subscription.traffic_limit_gb is None else f"{subscription.traffic_limit_gb} ГБ"
+        rows.append(
+            f"<tr><td>{subscription.id}</td><td><code>{escape(subscription.plan_code)}</code></td>"
+            f"<td><span class=\"badge\">{escape(subscription.status)}</span></td>"
+            f"<td>{format_admin_dt(subscription.starts_at)}</td><td>{format_admin_dt(subscription.expires_at)}</td>"
+            f"<td>{escape(traffic)}</td></tr>"
+        )
+    rows.append("</tbody>")
+    return "\n".join(rows)
+
+
+def render_detail_key_rows(keys: list[VpnKey]) -> str:
+    private_keys = sorted([key for key in keys if key.key_type == "private"], key=lambda item: item.created_at, reverse=True)
+    if not private_keys:
+        return table_empty("Ключей нет")
+    rows = ["<thead><tr><th>ID</th><th>Email</th><th>Сервер</th><th>Inbound-ы</th><th>IP limit</th><th>Статус</th><th>Создан</th><th>До</th></tr></thead><tbody>"]
+    for key in private_keys:
+        inbounds = ", ".join(str(item) for item in (key.x3ui_inbound_ids or [])) or "нет"
+        status = "active" if key.active else "off"
+        rows.append(
+            f"<tr><td>{key.id}</td><td><code>{escape(key.email)}</code></td>"
+            f"<td>{escape(key.server_label or 'нет')}</td><td><code>{escape(inbounds)}</code></td>"
+            f"<td>{'' if key.limit_ip is None else key.limit_ip}</td>"
+            f"<td><span class=\"badge {'active' if key.active else 'offline'}\">{status}</span></td>"
+            f"<td>{format_admin_dt(key.created_at)}</td><td>{format_admin_dt(key.expires_at)}</td></tr>"
+        )
+    rows.append("</tbody>")
+    return "\n".join(rows)
+
+
+def render_detail_order_rows(orders: list[Order]) -> str:
+    ordered = sorted(orders, key=lambda item: item.created_at, reverse=True)
+    if not ordered:
+        return table_empty("Заказов нет")
+    rows = ["<thead><tr><th>ID</th><th>Тариф</th><th>Сумма</th><th>Статус</th><th>Провайдер</th><th>Создан</th><th>Оплачен</th></tr></thead><tbody>"]
+    for order in ordered[:50]:
+        rows.append(
+            f"<tr><td>{order.id}</td><td><code>{escape(order.plan_code)}</code></td><td>{order.amount_rub} RUB</td>"
+            f"<td><span class=\"badge\">{escape(order.status)}</span></td><td>{escape(order.payment_provider)}</td>"
+            f"<td>{format_admin_dt(order.created_at)}</td><td>{format_admin_dt(order.paid_at)}</td></tr>"
+        )
+    rows.append("</tbody>")
+    return "\n".join(rows)
+
+
+def render_detail_profile_rows(profiles: list[DirectUserProfile]) -> str:
+    if not profiles:
+        return table_empty("Direct-профилей нет")
+    rows = ["<thead><tr><th>ID</th><th>Node</th><th>Template</th><th>Inbound</th><th>Port</th><th>Статус</th><th>Обновлён</th></tr></thead><tbody>"]
+    for profile in profiles:
+        rows.append(
+            f"<tr><td>{profile.id}</td><td><code>{escape(profile.node_id)}</code></td>"
+            f"<td>{escape(profile.template_code)}</td><td>{profile.inbound_id or ''}</td><td>{profile.port}</td>"
+            f"<td><span class=\"badge\">{escape(profile.status)}</span></td><td>{format_admin_dt(profile.updated_at)}</td></tr>"
+        )
+    rows.append("</tbody>")
+    return "\n".join(rows)
+
+
+def render_user_action_dialogs(
+    user: User,
+    token_qs: str,
+    node_options: str,
+    plan_options: str,
+    username: str,
+) -> str:
+    issue_key_url = f"/admin/users/{user.id}/issue-key{token_qs}"
+    delete_url = f"/admin/users/{user.id}/delete-access{token_qs}"
+    return f"""
+      <dialog id="delete-dialog">
+        <form method="post" id="delete-form" action="{escape(delete_url)}">
+          <input type="hidden" name="return_to" value="detail">
+          <h2>Удалить доступ?</h2>
+          <p id="delete-user-label" class="muted">{username} / {user.telegram_id}</p>
+          <label class="checkline">
+            <input type="checkbox" name="delete_inbounds" value="1">
+            Удалить также direct inbound-ы пользователя
+          </label>
+          <p class="muted">Без галочки будет удалён только активный клиент/ключ, а inbound-слоты останутся закреплены за пользователем.</p>
+          <div class="actions">
+            <button class="danger" type="submit">Удалить</button>
+            <button class="secondary" type="button" onclick="closeDeleteDialog()">Отмена</button>
+          </div>
+        </form>
+      </dialog>
+      <dialog id="issue-key-dialog">
+        <form method="post" id="issue-key-form" action="{escape(issue_key_url)}">
+          <input type="hidden" name="return_to" value="detail">
+          <h2>Выдать ключ?</h2>
+          <p id="issue-key-user-label" class="muted">{username} / {user.telegram_id}</p>
+          <label>Узел / страна<select name="node_id">{node_options}</select></label>
+          <label>Тариф<select name="plan_code">{plan_options}</select></label>
+          <p class="muted">Можно оставить текущую подписку или сразу назначить выбранный тариф. Бот создаст новый sub и отправит его в Telegram.</p>
+          <div class="actions">
+            <button type="submit">Да, выдать</button>
+            <button class="secondary" type="button" onclick="closeIssueKeyDialog()">Нет</button>
+          </div>
+        </form>
+      </dialog>
+    """
+
+
+def render_user_action_scripts() -> str:
+    return """
+    <script>
+      const dialog = document.getElementById('delete-dialog');
+      const form = document.getElementById('delete-form');
+      const label = document.getElementById('delete-user-label');
+      const issueDialog = document.getElementById('issue-key-dialog');
+      const issueForm = document.getElementById('issue-key-form');
+      const issueLabel = document.getElementById('issue-key-user-label');
+      function openDeleteDialog(button) {
+        form.action = button.dataset.action;
+        label.textContent = button.dataset.user;
+        form.querySelector('input[name="delete_inbounds"]').checked = false;
+        if (dialog.showModal) dialog.showModal(); else if (confirm('Удалить доступ пользователя?')) form.submit();
+      }
+      function closeDeleteDialog() {
+        dialog.close();
+      }
+      function openIssueKeyDialog(button) {
+        issueForm.action = button.dataset.action;
+        issueLabel.textContent = button.dataset.user;
+        if (issueDialog.showModal) issueDialog.showModal(); else if (confirm('Выдать ключ пользователю?')) issueForm.submit();
+      }
+      function closeIssueKeyDialog() {
+        issueDialog.close();
+      }
+    </script>
+    """
+
+
 def render_admin_user_filters(request: Request, token: str, rows: list[AdminUserMonitorRow]) -> str:
     params = request.query_params
     q = str(params.get("q") or "")
@@ -1293,22 +2449,93 @@ def render_admin_user_filters(request: Request, token: str, rows: list[AdminUser
     key_state = str(params.get("key") or "all")
     server = str(params.get("server") or "all")
     sort = str(params.get("sort") or "created_desc")
+    per_page = str(parse_page_size(str(params.get("per_page") or "50")))
     server_options = [("all", "Все серверы")]
     server_options.extend((label, label) for label in sorted({row.server_label for row in rows if row.server_label != "нет ключа"}))
     return f"""
         <form method="get" action="/admin/users" class="grid filters">
           {hidden_token_input(token)}
-          <label>Поиск<input name="q" value="{escape(q)}" placeholder="@username, Telegram ID, user ID"></label>
+          <label class="search-field">Поиск по всем пользователям<input name="q" value="{escape(q)}" placeholder="@username, Telegram ID, user ID"></label>
           <label>Подписка<select name="plan">{option_tags([("all", "Все"), ("paid", "Платные"), ("free", "Бесплатные trial"), ("expired", "Истекшие"), ("none", "Без подписки")], plan)}</select></label>
           <label>Ключ<select name="key">{option_tags([("all", "Все"), ("active", "Активный"), ("expired", "Истёк / отключён"), ("no_key", "Нет ключа")], key_state)}</select></label>
           <label>Сервер<select name="server">{option_tags(server_options, server)}</select></label>
           <label>Сортировка<select name="sort">{option_tags([("created_desc", "Новые сверху"), ("buy_desc", "Купить: больше сверху"), ("support_desc", "Поддержка: больше сверху"), ("replace_desc", "Замены: больше сверху"), ("paid_orders_desc", "Оплат: больше сверху"), ("inbounds_desc", "Inbound-ы: больше сверху"), ("expires_asc", "Истекают раньше")], sort)}</select></label>
+          <label>На странице<select name="per_page">{option_tags([("25", "25"), ("50", "50"), ("100", "100")], per_page)}</select></label>
           <div class="actions">
             <button type="submit">Показать</button>
             <a class="button secondary" href="/admin/users{('?' + urlencode({'token': token})) if token else ''}">Сбросить</a>
           </div>
         </form>
     """
+
+
+def render_admin_user_pagination(request: Request, token: str, total: int, page: int, per_page: int) -> str:
+    total_pages = max(1, (total + per_page - 1) // per_page)
+    if total_pages <= 1:
+        return '<p class="muted pager">Все найденные пользователи помещаются на одной странице.</p>'
+
+    def page_url(target_page: int) -> str:
+        params = dict(request.query_params)
+        if token:
+            params["token"] = token
+        params["page"] = str(target_page)
+        params["per_page"] = str(per_page)
+        return f"/admin/users?{urlencode(params)}"
+
+    prev_link = (
+        f'<a class="button secondary" href="{escape(page_url(page - 1))}">Назад</a>'
+        if page > 1
+        else '<span class="button secondary disabled">Назад</span>'
+    )
+    next_link = (
+        f'<a class="button secondary" href="{escape(page_url(page + 1))}">Дальше</a>'
+        if page < total_pages
+        else '<span class="button secondary disabled">Дальше</span>'
+    )
+    return (
+        '<div class="pager">'
+        f"{prev_link}"
+        f"<span>Страница <strong>{page}</strong> из <strong>{total_pages}</strong></span>"
+        f"{next_link}"
+        "</div>"
+    )
+
+
+def direct_node_issue_options(nodes: list[DirectNodeConfig]) -> str:
+    available = [
+        node
+        for node in nodes
+        if node.node_id and node.api_base_url and node.api_username and node.api_password and (node.public_host or node.public_ip)
+    ]
+    options = [
+        f'<option value="{SYSTEM_NODE_AUTO}">Авто — самый свободный основной сервер</option>'
+    ]
+    options.extend(
+        f'<option value="{escape(node.node_id)}">{escape(node.country_flag)} {escape(node.name)} ({escape(node.country_code)}, {escape(node.node_id)})</option>'
+        for node in available
+    )
+    return "\n".join(options)
+
+
+async def admin_issue_plans(session: AsyncSession) -> list[Plan]:
+    return list(
+        (
+            await session.scalars(
+                select(Plan)
+                .where(Plan.is_active.is_(True), Plan.code != "admin_test")
+                .order_by(Plan.price_rub, Plan.days, Plan.code)
+            )
+        ).all()
+    )
+
+
+def admin_issue_plan_options(plans: list[Plan]) -> str:
+    options = ['<option value="">Текущая активная подписка — не менять</option>']
+    options.extend(
+        f'<option value="{escape(plan.code)}">{escape(plan.title)} — {plan.days} дн., {plan.price_rub} ₽</option>'
+        for plan in plans
+    )
+    return "\n".join(options)
 
 
 def render_admin_user_row(row: AdminUserMonitorRow, token_qs: str) -> str:
@@ -1321,9 +2548,11 @@ def render_admin_user_row(row: AdminUserMonitorRow, token_qs: str) -> str:
     key_label = key_admin_label(row.key, row.key_state)
     key_until = format_admin_dt(row.key.expires_at) if row.key and row.key.expires_at else "без срока"
     action_url = f"/admin/users/{user.id}/delete-access{token_qs}"
+    issue_key_url = f"/admin/users/{user.id}/issue-key{token_qs}"
+    detail_url = f"/admin/users/{user.id}{token_qs}"
     return f"""<tr>
       <td data-label="Пользователь">
-        <strong>{username}</strong><br>
+        <a class="user-link" href="{escape(detail_url)}"><strong>{username}</strong></a><br>
         <span class="muted">{first_name}</span><br>
         <code>{user.telegram_id}</code><br>
         <span class="muted">ID {user.id}, с {created}</span>
@@ -1347,9 +2576,13 @@ def render_admin_user_row(row: AdminUserMonitorRow, token_qs: str) -> str:
         Купить: <strong>{int(user.buy_clicks or 0)}</strong><br>
         Поддержка: <strong>{int(user.support_clicks or 0)}</strong><br>
         Замена: <strong>{int(user.replace_key_clicks or 0)}</strong><br>
-        Успешно: <strong>{int(user.replace_key_successes or 0)}</strong>
+        Успешно: <strong>{int(user.replace_key_successes or 0)}</strong><br>
+        Отзывы: <strong>{row.feedback_count}</strong><br>
+        <span class="muted">последний: {escape(feedback_rating_admin_label(row.last_feedback_rating))}</span>
       </td>
       <td data-label="Управление">
+        <a class="button secondary icon-button" href="{escape(detail_url)}" title="Статистика пользователя">!</a>
+        <button class="secondary icon-button" type="button" title="Выдать ключ" data-action="{escape(issue_key_url)}" data-user="{username} / {user.telegram_id}" onclick="openIssueKeyDialog(this)">🔑</button>
         <button class="danger" type="button" data-action="{escape(action_url)}" data-user="{username} / {user.telegram_id}" onclick="openDeleteDialog(this)">Удалить доступ</button>
       </td>
     </tr>"""
@@ -1360,6 +2593,18 @@ def option_tags(options: list[tuple[str, str]], selected: str) -> str:
         f'<option value="{escape(value)}"{" selected" if value == selected else ""}>{escape(label)}</option>'
         for value, label in options
     )
+
+
+def feedback_rating_admin_label(value: str | None) -> str:
+    return {
+        "excellent": "отлично",
+        "good": "хорошо",
+        "satisfactory": "удовлетворительно",
+        "custom": "сам напешууууУ",
+        "delivery_forbidden": "бот заблокирован",
+        "empty": "без оценки",
+        "": "нет",
+    }.get(value or "", value or "нет")
 
 
 def subscription_admin_label(subscription: Subscription | None, plan_kind: str) -> str:
@@ -1384,6 +2629,16 @@ def key_admin_label(key: VpnKey | None, key_state: str) -> str:
 
 def format_admin_dt(value) -> str:
     return value.strftime("%d.%m.%Y %H:%M UTC") if value else "нет"
+
+
+def format_bytes(value: int) -> str:
+    amount = float(max(0, int(value or 0)))
+    units = ["B", "KB", "MB", "GB", "TB"]
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            return f"{amount:.1f} {unit}" if unit != "B" else f"{int(amount)} {unit}"
+        amount /= 1024
+    return f"{amount:.1f} TB"
 
 
 def render_direct_nodes_page(
@@ -1415,7 +2670,7 @@ def render_direct_nodes_page(
         <p class="eyebrow">MiloshVPN Admin</p>
         <h1>Direct-node узлы</h1>
         <p class="muted">Здесь хранятся только настройки узлов. Inbound-ы сюда не вписываются: они создаются отдельно на 3x-ui узла для конкретного пользователя.</p>
-        <div class="actions"><a class="button secondary" href="/admin{token_qs}">Назад</a></div>
+        {admin_nav(token, "direct_nodes")}
       </section>
 
       <section class="panel">
@@ -1706,7 +2961,7 @@ def admin_simple_page_css() -> str:
         color: #566174;
         font-size: 13px;
       }
-      input {
+      input, select {
         box-sizing: border-box;
         width: 100%;
         border: 1px solid #cad2dc;
@@ -1748,6 +3003,14 @@ def admin_simple_page_css() -> str:
       .button.secondary {
         background: #e9eef5;
         color: #121417;
+      }
+      button.secondary {
+        background: #e9eef5;
+        color: #121417;
+      }
+      .button.disabled {
+        opacity: 0.55;
+        pointer-events: none;
       }
       .actions {
         display: flex;
@@ -1795,7 +3058,7 @@ def admin_simple_page_css() -> str:
         table { display: block; overflow-x: auto; }
         dl div { grid-template-columns: 1fr; gap: 4px; }
       }
-    """
+    """ + admin_nav_css()
 
 
 def admin_users_page_css() -> str:
@@ -1805,6 +3068,81 @@ def admin_users_page_css() -> str:
       }
       .filters {
         grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      }
+      .search-field {
+        grid-column: span 2;
+      }
+      .list-head {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .list-head h2 {
+        margin-bottom: 0;
+      }
+      .pager {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+        margin: 0 0 12px;
+      }
+      .panel > .pager:last-child {
+        margin: 12px 0 0;
+      }
+      .icon-button {
+        min-width: 42px;
+        width: auto;
+        font-size: 18px;
+      }
+      .user-link {
+        color: #1563ff;
+        text-decoration: none;
+      }
+      .user-link:hover {
+        text-decoration: underline;
+      }
+      .compact-stats {
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      }
+      .subheading {
+        margin-top: 18px;
+        font-size: 17px;
+      }
+      .activity-chart {
+        display: grid;
+        gap: 8px;
+      }
+      .activity-row {
+        display: grid;
+        grid-template-columns: 54px minmax(120px, 1fr) 64px;
+        gap: 10px;
+        align-items: center;
+      }
+      .activity-date,
+      .activity-hours {
+        color: #687385;
+        font-size: 12px;
+      }
+      .activity-hours {
+        text-align: right;
+      }
+      .activity-bar-track {
+        height: 12px;
+        border-radius: 999px;
+        background: #e9eef5;
+        overflow: hidden;
+      }
+      .activity-bar {
+        height: 100%;
+        border-radius: inherit;
+        background: #1563ff;
+      }
+      .detail-table {
+        display: table;
       }
       .stat.wide {
         grid-column: span 2;
@@ -1855,29 +3193,44 @@ def admin_users_page_css() -> str:
           grid-column: 1 / -1;
         }
         .users-table,
+        .detail-table,
         .users-table thead,
+        .detail-table thead,
         .users-table tbody,
+        .detail-table tbody,
         .users-table tr,
+        .detail-table tr,
         .users-table th,
+        .detail-table th,
         .users-table td {
+          display: block;
+          width: 100%;
+        }
+        .detail-table td {
           display: block;
           width: 100%;
         }
         .users-table thead {
           display: none;
         }
-        .users-table tr {
+        .detail-table thead {
+          display: none;
+        }
+        .users-table tr,
+        .detail-table tr {
           border: 1px solid #dfe5ec;
           border-radius: 8px;
           margin-bottom: 12px;
           padding: 8px 10px;
           background: #fff;
         }
-        .users-table td {
+        .users-table td,
+        .detail-table td {
           border-bottom: 1px solid #edf1f5;
           padding: 9px 0;
         }
-        .users-table td:last-child {
+        .users-table td:last-child,
+        .detail-table td:last-child {
           border-bottom: 0;
           width: 100%;
         }
@@ -1893,8 +3246,28 @@ def admin_users_page_css() -> str:
         .button {
           width: 100%;
         }
+        .icon-button {
+          width: 100%;
+        }
+        .search-field {
+          grid-column: auto;
+        }
+        .pager {
+          justify-content: stretch;
+        }
+        .pager span {
+          flex: 1 1 100%;
+          text-align: center;
+        }
         .actions {
           width: 100%;
+        }
+        .activity-row {
+          grid-template-columns: 48px 1fr;
+        }
+        .activity-hours {
+          grid-column: 2;
+          text-align: left;
         }
       }
       @media (max-width: 460px) {

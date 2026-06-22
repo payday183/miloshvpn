@@ -75,6 +75,8 @@ ADMIN_MAIN_MENU_TEXTS = (ADMIN_MAIN_MENU, ADMIN_MAIN_MENU_LEGACY)
 
 CHANNEL_GATE_SUBSCRIBED = "channel_gate_subscribed"
 REFERRAL_COPY = "referral_copy"
+TRIAL_SHOW_REFERRALS = "trial_show_referrals"
+TRIAL_FEEDBACK_PREFIX = "trial_feedback:"
 
 
 def main_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
@@ -186,5 +188,31 @@ def referral_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📋 Скопировать ссылку", callback_data=REFERRAL_COPY)],
+        ]
+    )
+
+
+def trial_expiry_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💠 Купить базовый тариф 75 RUB", callback_data="buy:basic")],
+            [InlineKeyboardButton(text="🤝 Пригласить друга", callback_data=TRIAL_SHOW_REFERRALS)],
+        ]
+    )
+
+
+def trial_feedback_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="отлично", callback_data=f"{TRIAL_FEEDBACK_PREFIX}excellent"),
+                InlineKeyboardButton(text="хорошо", callback_data=f"{TRIAL_FEEDBACK_PREFIX}good"),
+            ],
+            [
+                InlineKeyboardButton(text="удовлетворительно", callback_data=f"{TRIAL_FEEDBACK_PREFIX}satisfactory"),
+            ],
+            [
+                InlineKeyboardButton(text="сам напешууууУ", callback_data=f"{TRIAL_FEEDBACK_PREFIX}custom"),
+            ],
         ]
     )

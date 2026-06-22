@@ -122,17 +122,35 @@ class X3UIClient:
 
         async with self._client() as client:
             await self._login(client)
-            response = await client.post(
-                self._panel_path("/panel/api/clients/add"),
-                json={
-                    "client": api_client,
-                    "inboundIds": list(inbound_ids),
-                },
-            )
-            self._raise_for_x3ui(response)
+            created = False
+            try:
+                response = await client.post(
+                    self._panel_path("/panel/api/clients/add"),
+                    json={
+                        "client": api_client,
+                        "inboundIds": list(inbound_ids),
+                    },
+                )
+                self._raise_for_x3ui(response)
+                created = True
+                await self._ensure_client_in_inbounds(
+                    client,
+                    api_client=api_client,
+                    inbound_ids=inbound_ids,
+                )
 
-            links = tuple(await self._sub_links(client, sub_id=sub_id))
-            sub_url = await self._subscription_url(client, sub_id=sub_id)
+                links = tuple(await self._sub_links(client, sub_id=sub_id))
+                sub_url = await self._subscription_url(client, sub_id=sub_id)
+            except Exception:
+                if created:
+                    try:
+                        await client.post(
+                            self._panel_path(f"/panel/api/clients/del/{quote(email, safe='')}"),
+                            params={"keepTraffic": 0},
+                        )
+                    except Exception:
+                        pass
+                raise
 
         return ProvisionedClient(
             client_uuid=client_uuid,
@@ -142,6 +160,36 @@ class X3UIClient:
             inbound_ids=inbound_ids,
             links=links,
         )
+
+    async def _ensure_client_in_inbounds(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        api_client: dict[str, Any],
+        inbound_ids: Sequence[int],
+    ) -> None:
+        client_uuid = self._string_value(api_client.get("id") or api_client.get("uuid"))
+        email = self._string_value(api_client.get("email"))
+
+        async def missing_ids() -> list[int]:
+            missing: list[int] = []
+            for inbound_id in inbound_ids:
+                inbound = await self._get_inbound(client, int(inbound_id))
+                if self._find_inbound_client(inbound, email=email, client_uuid=client_uuid) is None:
+                    missing.append(int(inbound_id))
+            return missing
+
+        missing = await missing_ids()
+        for inbound_id in missing:
+            response = await client.post(
+                self._panel_path("/panel/api/clients/add"),
+                json={"client": api_client, "inboundIds": [inbound_id]},
+            )
+            self._raise_for_x3ui(response)
+
+        still_missing = await missing_ids() if missing else []
+        if still_missing:
+            raise X3UIError(f"3x-ui did not add client to inbound ids: {still_missing}")
 
     async def revoke_client(self, *, client_uuid: str, email: str | None = None) -> None:
         if self.target.mode == "mock":
@@ -269,6 +317,40 @@ class X3UIClient:
             response = await client.get(self._panel_path("/panel/api/inbounds/list"))
             self._raise_for_x3ui(response)
             return self._inbound_list(self._payload_data(response))
+
+    async def get_inbounds_by_ids(self, inbound_ids: Sequence[int]) -> list[dict[str, Any]]:
+        wanted_ids = tuple(dict.fromkeys(item for item in (self._int_value(raw) for raw in inbound_ids) if item > 0))
+        if not wanted_ids:
+            return await self.list_inbounds()
+        if self.target.mode == "mock":
+            return []
+
+        async with self._client() as client:
+            await self._login(client)
+            selected: list[dict[str, Any]] = []
+            missing: set[int] = set()
+            for inbound_id in wanted_ids:
+                response = await client.get(self._panel_path(f"/panel/api/inbounds/get/{inbound_id}"))
+                if response.status_code == 404:
+                    missing.add(inbound_id)
+                    continue
+                self._raise_for_x3ui(response)
+                payload = self._payload_data(response)
+                if isinstance(payload, dict):
+                    selected.append(payload)
+                else:
+                    missing.add(inbound_id)
+
+            if missing:
+                response = await client.get(self._panel_path("/panel/api/inbounds/list"))
+                self._raise_for_x3ui(response)
+                existing_ids = {self._int_value(inbound.get("id")) for inbound in selected}
+                for inbound in self._inbound_list(self._payload_data(response)):
+                    inbound_id = self._int_value(inbound.get("id"))
+                    if inbound_id in missing and inbound_id not in existing_ids:
+                        selected.append(inbound)
+
+            return selected
 
     async def list_nodes(self) -> list[dict[str, Any]]:
         if self.target.mode == "mock":

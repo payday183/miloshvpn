@@ -1,6 +1,8 @@
 from datetime import timedelta
+import logging
+from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -11,6 +13,8 @@ from app.services.x3ui import X3UIClient
 from app.timeutils import utcnow
 
 TRIAL_PLAN_CODE = "trial"
+KEY_ROTATION_GRACE_SECONDS = 5 * 60
+logger = logging.getLogger(__name__)
 
 
 async def get_active_subscription(session: AsyncSession, user_id: int) -> Subscription | None:
@@ -97,11 +101,23 @@ async def create_private_key(session: AsyncSession, user: User, subscription: Su
     if direct_node_user_provisioning_requested(settings):
         return await create_or_replace_user_direct_key(session, user, subscription)
 
-    selection = await select_inbounds_for_client("user")
+    return await create_system_private_key(session, user, subscription)
 
-    await revoke_user_private_keys(session, user.id)
 
-    label = f"milosh_{user.telegram_id}"
+async def create_system_private_key(
+    session: AsyncSession,
+    user: User,
+    subscription: Subscription,
+    *,
+    selection=None,
+    revoke_existing: bool = True,
+) -> VpnKey:
+    """Issue a key on the least-loaded node managed by the system 3x-ui panel."""
+    settings = get_settings()
+
+    selection = selection or await select_inbounds_for_client("user")
+
+    label = f"milosh_{user.telegram_id}_{uuid4().hex[:8]}"
     client = await X3UIClient(settings).create_subscription_client(
         email=label,
         telegram_id=user.telegram_id,
@@ -110,6 +126,8 @@ async def create_private_key(session: AsyncSession, user: User, subscription: Su
         inbound_ids=selection.inbound_ids,
         limit_ip=settings.x3ui_user_limit_ip,
     )
+    if revoke_existing:
+        await revoke_user_private_keys(session, user.id)
     key = VpnKey(
         node_id=None,
         user_id=user.id,
@@ -135,7 +153,149 @@ async def replace_active_private_key(session: AsyncSession, user: User) -> VpnKe
     subscription = await get_active_subscription(session, user.id)
     if subscription is None:
         raise RuntimeError("No active subscription for key replacement")
-    return await create_private_key(session, user, subscription)
+
+    current_key = await get_active_key(session, user.id)
+    if current_key is None:
+        return await create_private_key(session, user, subscription)
+
+    candidates = await replacement_backend_candidates(session, current_key)
+    errors: list[str] = []
+    new_key: VpnKey | None = None
+    selected_backend = ""
+    for candidate in candidates:
+        savepoint = await session.begin_nested()
+        try:
+            if candidate["name"] == "france":
+                new_key = await create_system_private_key(
+                    session,
+                    user,
+                    subscription,
+                    selection=candidate["selection"],
+                    revoke_existing=False,
+                )
+            else:
+                from app.services.direct_node_admin import create_or_replace_user_direct_key
+
+                new_key = await create_or_replace_user_direct_key(
+                    session,
+                    user,
+                    subscription,
+                    node_config=candidate["config"],
+                    require_flags=False,
+                    revoke_existing=False,
+                )
+            await savepoint.commit()
+            selected_backend = str(candidate["name"])
+            break
+        except Exception as exc:
+            await savepoint.rollback()
+            errors.append(f"{candidate['name']}: {str(exc)[:160]}")
+            logger.exception("Replacement provisioning failed on backend %s", candidate["name"])
+
+    if new_key is None:
+        raise RuntimeError("No VPN server accepted replacement: " + "; ".join(errors))
+
+    current_backend = key_backend_name(current_key)
+    now = utcnow()
+    if current_backend == selected_backend:
+        current_key.revoked_at = now + timedelta(seconds=KEY_ROTATION_GRACE_SECONDS)
+    else:
+        try:
+            await revoke_key_remote(session, current_key)
+        except Exception:
+            # Keep it remotely usable until the worker retries the cleanup.
+            current_key.revoked_at = now
+            logger.exception("Immediate old-key cleanup failed; scheduled for retry: key_id=%s", current_key.id)
+        else:
+            current_key.active = False
+            current_key.revoked_at = now
+            await release_slots_after_backend_move(session, current_key, new_key)
+
+    await session.flush()
+    return new_key
+
+
+def key_backend_name(key: VpnKey) -> str:
+    from app.services.direct_node_admin import is_direct_vpn_key
+
+    return "germany" if is_direct_vpn_key(key) else "france"
+
+
+async def replacement_backend_candidates(session: AsyncSession, current_key: VpnKey) -> list[dict[str, object]]:
+    from app.services.direct_node_admin import default_user_direct_node_config, x3ui_client_for_config
+
+    candidates: list[dict[str, object]] = []
+    errors: list[str] = []
+
+    try:
+        selection = await select_inbounds_for_client("user")
+        france_load = int(
+            await session.scalar(
+                select(func.count(func.distinct(VpnKey.user_id))).where(
+                    VpnKey.active.is_(True),
+                    VpnKey.key_type == "private",
+                    VpnKey.user_id.is_not(None),
+                    VpnKey.email.like("milosh_%"),
+                )
+            )
+            or 0
+        )
+        candidates.append({"name": "france", "load": france_load, "selection": selection})
+    except Exception as exc:
+        errors.append(f"france: {str(exc)[:160]}")
+
+    try:
+        settings = get_settings()
+        config = await default_user_direct_node_config(session, settings)
+        if config is None:
+            raise RuntimeError("Germany direct-node config was not found")
+        inbounds = await x3ui_client_for_config(config, settings).list_inbounds()
+        if not inbounds:
+            raise RuntimeError("Germany 3x-ui has no inbounds")
+        germany_load = int(
+            await session.scalar(
+                select(func.count(func.distinct(VpnKey.user_id))).where(
+                    VpnKey.active.is_(True),
+                    VpnKey.key_type == "private",
+                    VpnKey.user_id.is_not(None),
+                    VpnKey.email.like("direct_user_%"),
+                )
+            )
+            or 0
+        )
+        candidates.append({"name": "germany", "load": germany_load, "config": config})
+    except Exception as exc:
+        errors.append(f"germany: {str(exc)[:160]}")
+
+    if not candidates:
+        raise RuntimeError("No healthy VPN servers: " + "; ".join(errors))
+
+    current_backend = key_backend_name(current_key)
+    return sorted(candidates, key=lambda item: (int(item["load"]), item["name"] == current_backend, str(item["name"])))
+
+
+async def release_slots_after_backend_move(session: AsyncSession, old_key: VpnKey, new_key: VpnKey) -> None:
+    from app.services.direct_node_admin import (
+        direct_node_id_for_key,
+        is_direct_vpn_key,
+        release_direct_key_slots,
+    )
+
+    if not is_direct_vpn_key(old_key):
+        return
+    old_node_id = await direct_node_id_for_key(session, old_key)
+    new_node_id = await direct_node_id_for_key(session, new_key) if is_direct_vpn_key(new_key) else None
+    if old_node_id is not None and old_node_id == new_node_id:
+        return
+
+    settings = get_settings()
+    await release_direct_key_slots(
+        session,
+        old_key,
+        status="moved",
+        release_slots=True,
+        delete_remote_inbounds=settings.inbound_delete_on_user_move,
+    )
 
 
 async def extend_active_subscription_days(session: AsyncSession, user_id: int, days: int) -> Subscription | None:
@@ -208,7 +368,13 @@ async def ensure_trial_subscription(session: AsyncSession, user: User) -> tuple[
     return subscription, key, True
 
 
-async def create_or_extend_subscription(session: AsyncSession, user: User, plan_code: str) -> Subscription:
+async def create_or_extend_subscription(
+    session: AsyncSession,
+    user: User,
+    plan_code: str,
+    *,
+    issue_key: bool = True,
+) -> Subscription:
     from app.models import Plan
 
     plan = await session.get(Plan, plan_code)
@@ -241,7 +407,8 @@ async def create_or_extend_subscription(session: AsyncSession, user: User, plan_
         subscription.status = "active"
 
     await session.flush()
-    await create_private_key(session, user, subscription)
+    if issue_key:
+        await create_private_key(session, user, subscription)
     return subscription
 
 

@@ -1,4 +1,5 @@
 import asyncio
+from html import escape
 import logging
 import random
 import re
@@ -6,7 +7,15 @@ import re
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
 from aiogram.filters import BaseFilter, Command, CommandStart
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyKeyboardMarkup
+from aiogram.types import (
+    BufferedInputFile,
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    ReplyKeyboardMarkup,
+)
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
@@ -53,6 +62,11 @@ from app.services.public_keys import (
 from app.services.referrals import capture_start_referral, credit_pending_referral, referral_profile_for_user
 from app.services.seed import ADMIN_TEST_PLAN_CODE
 from app.services.stats import collect_stats
+from app.services.trial_notifications import (
+    complete_custom_feedback_text,
+    mark_feedback_sent_to_admin,
+    record_trial_feedback_response,
+)
 from app.services.user_actions import record_user_action
 from app.services.users import add_admin, get_or_create_user, is_admin
 from app.services.vpn import (
@@ -96,6 +110,9 @@ from app.tg.texts import (
     start_text,
     subscription_text,
     support_text,
+    trial_custom_feedback_saved_text,
+    trial_feedback_thanks_text,
+    trial_replace_unavailable_text,
 )
 from app.timeutils import utcnow
 
@@ -104,9 +121,12 @@ router = Router()
 ADMIN_ORDER_QUERY_RE = re.compile(r"(MILO-[0-9]+-[A-Z0-9]{5,8}|#?[0-9]{1,20})", re.IGNORECASE)
 PENDING_QR_UPLOADS: dict[int, int] = {}
 PENDING_FAST_REVIEW_UPLOADS: set[int] = set()
+PENDING_FEEDBACK_REQUESTS: dict[int, int] = {}
 REVIEW_QUEUE_STATE: dict[int, list[int]] = {}
 REVIEW_QUEUE_TOTALS: dict[int, int] = {}
 BOT_USERNAME_CACHE = ""
+PAYMENT_INSTRUCTION_IMAGE = "/app/img/payset.jpg"
+PAYMENT_INSTRUCTION_POINTER = "👆👆👆 <b>Инструкция по оплате выше</b> 👆👆👆"
 REPLACE_KEY_CHALLENGES: dict[int, str] = {}
 REPLACE_KEY_CHALLENGE_PREFIX = "replace_key_challenge:"
 REPLACE_KEY_CHALLENGE_OPTIONS: tuple[tuple[str, str, str, str], ...] = (
@@ -132,6 +152,11 @@ async def refresh_main_menu_for_legacy_button(message: Message, admin: bool, val
 class PendingFastReviewFilter(BaseFilter):
     async def __call__(self, message: Message) -> bool:
         return bool(message.from_user and message.from_user.id in PENDING_FAST_REVIEW_UPLOADS)
+
+
+class PendingFeedbackFilter(BaseFilter):
+    async def __call__(self, message: Message) -> bool:
+        return bool(message.from_user and message.from_user.id in PENDING_FEEDBACK_REQUESTS)
 
 
 def visible_purchase_plans(plans: list[Plan], admin: bool) -> list[Plan]:
@@ -238,6 +263,45 @@ async def record_callback_action(callback: CallbackQuery, action: str) -> None:
         await session.commit()
 
 
+def feedback_rating_label(value: str) -> str:
+    return {
+        "excellent": "отлично",
+        "good": "хорошо",
+        "satisfactory": "удовлетворительно",
+        "custom": "сам напешууууУ",
+    }.get(value, value or "без оценки")
+
+
+async def send_admin_feedback_notification(
+    bot: Bot,
+    admin_ids: list[int],
+    *,
+    feedback_id: int,
+    user_telegram_id: int,
+    username: str | None,
+    rating: str,
+    text: str,
+) -> bool:
+    username_text = f"@{escape(username)}" if username else "без username"
+    feedback_text = escape(text.strip()) if text.strip() else "без текста"
+    message = (
+        "📝 Новый отзыв MiloshVPN\n\n"
+        f"ID отзыва: <code>{feedback_id}</code>\n"
+        f"Пользователь: {username_text}\n"
+        f"Telegram ID: <code>{user_telegram_id}</code>\n"
+        f"Оценка: <b>{escape(feedback_rating_label(rating))}</b>\n\n"
+        f"Текст:\n{feedback_text}"
+    )
+    sent = False
+    for admin_id in admin_ids:
+        try:
+            await bot.send_message(admin_id, message, parse_mode=ParseMode.HTML)
+            sent = True
+        except Exception:
+            logging.exception("Failed to send feedback notification to admin %s", admin_id)
+    return sent
+
+
 async def current_user(message: Message):
     async with SessionLocal() as session:
         user = await get_or_create_user(
@@ -302,6 +366,48 @@ async def start(message: Message) -> None:
     )
 
 
+@router.message(PendingFeedbackFilter(), F.text)
+async def receive_custom_feedback(message: Message, bot: Bot) -> None:
+    feedback_id = PENDING_FEEDBACK_REQUESTS.pop(message.from_user.id, 0)
+    feedback_text = (message.text or "").strip()
+    if not feedback_text:
+        PENDING_FEEDBACK_REQUESTS[message.from_user.id] = feedback_id
+        await message.answer("Напиши отзыв текстом одним сообщением, пожалуйста.")
+        return
+
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=message.from_user.id,
+            username=message.from_user.username,
+            first_name=message.from_user.first_name,
+        )
+        feedback = await complete_custom_feedback_text(
+            session,
+            user,
+            feedback_id=feedback_id or None,
+            text=feedback_text,
+        )
+        admin_ids = await get_admin_chat_ids(session)
+        await session.commit()
+
+    sent = await send_admin_feedback_notification(
+        bot,
+        admin_ids,
+        feedback_id=feedback.id,
+        user_telegram_id=message.from_user.id,
+        username=message.from_user.username,
+        rating=feedback.rating or "custom",
+        text=feedback.text or feedback_text,
+    )
+    if sent:
+        async with SessionLocal() as session:
+            await mark_feedback_sent_to_admin(session, feedback.id)
+            await session.commit()
+
+    await message.answer(trial_custom_feedback_saved_text())
+
+
 @router.message(text_in(kb.PROFILE_TEXTS))
 async def profile(message: Message) -> None:
     user, admin = await current_user(message)
@@ -328,12 +434,29 @@ async def profile(message: Message) -> None:
 
 @router.message(text_in(kb.REFERRALS_TEXTS))
 async def referrals(message: Message, bot: Bot) -> None:
+    await send_referral_panel(
+        message,
+        bot,
+        telegram_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+    )
+
+
+async def send_referral_panel(
+    message: Message,
+    bot: Bot,
+    *,
+    telegram_id: int,
+    username: str | None,
+    first_name: str | None,
+) -> None:
     async with SessionLocal() as session:
         user = await get_or_create_user(
             session,
-            telegram_id=message.from_user.id,
-            username=message.from_user.username,
-            first_name=message.from_user.first_name,
+            telegram_id=telegram_id,
+            username=username,
+            first_name=first_name,
         )
         admin = await is_admin(session, user.telegram_id)
         referral = await referral_profile_for_user(session, user, bot_username=await referral_bot_username(bot))
@@ -344,6 +467,62 @@ async def referrals(message: Message, bot: Bot) -> None:
         reply_markup=kb.referral_keyboard() if referral.url else kb.main_keyboard(admin),
         parse_mode=ParseMode.HTML,
     )
+
+
+@router.callback_query(F.data == kb.TRIAL_SHOW_REFERRALS)
+async def trial_show_referrals(callback: CallbackQuery, bot: Bot) -> None:
+    await send_referral_panel(
+        callback.message,
+        bot,
+        telegram_id=callback.from_user.id,
+        username=callback.from_user.username,
+        first_name=callback.from_user.first_name,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith(kb.TRIAL_FEEDBACK_PREFIX))
+async def trial_feedback(callback: CallbackQuery) -> None:
+    response = callback.data.removeprefix(kb.TRIAL_FEEDBACK_PREFIX)
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        feedback = await record_trial_feedback_response(session, user, response)
+        admin_ids = await get_admin_chat_ids(session)
+        await session.commit()
+
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    if response == "custom":
+        PENDING_FEEDBACK_REQUESTS[callback.from_user.id] = feedback.id if feedback is not None else 0
+        await callback.message.answer(trial_feedback_thanks_text(response))
+        await callback.answer("Жду отзыв")
+        return
+
+    if feedback is not None:
+        sent = await send_admin_feedback_notification(
+            callback.bot,
+            admin_ids,
+            feedback_id=feedback.id,
+            user_telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            rating=response,
+            text="",
+        )
+        if sent:
+            async with SessionLocal() as session:
+                await mark_feedback_sent_to_admin(session, feedback.id)
+                await session.commit()
+
+    await callback.message.answer(trial_feedback_thanks_text(response))
+    await callback.answer("Спасибо")
 
 
 @router.callback_query(F.data == kb.CHANNEL_GATE_SUBSCRIBED)
@@ -436,6 +615,33 @@ async def subscription(message: Message) -> None:
 @router.callback_query(F.data == "replace_key")
 async def replace_key(callback: CallbackQuery) -> None:
     await record_callback_action(callback, "replace_key")
+    async with SessionLocal() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=callback.from_user.id,
+            username=callback.from_user.username,
+            first_name=callback.from_user.first_name,
+        )
+        active_subscription = await get_active_subscription(session, user.id)
+        latest_subscription = None
+        if active_subscription is None:
+            latest_subscription = await session.scalar(
+                select(Subscription)
+                .where(Subscription.user_id == user.id)
+                .order_by(Subscription.expires_at.desc())
+                .limit(1)
+            )
+        await session.commit()
+
+    if active_subscription is None:
+        await callback.message.answer(
+            trial_replace_unavailable_text(latest_subscription),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.trial_expiry_keyboard(),
+        )
+        await callback.answer("Срок закончился", show_alert=True)
+        return
+
     await send_replace_key_challenge(callback)
 
 
@@ -475,6 +681,19 @@ async def replace_key_after_challenge(callback: CallbackQuery) -> None:
             logging.exception("Failed to replace key for telegram_id=%s", callback.from_user.id)
             if "SUBSCRIPTION_BASE_URL" in str(exc):
                 await callback.answer("Замена на Germany не настроена: SUBSCRIPTION_BASE_URL пустой.", show_alert=True)
+            elif "No active subscription" in str(exc):
+                latest_subscription = await session.scalar(
+                    select(Subscription)
+                    .where(Subscription.user_id == user.id)
+                    .order_by(Subscription.expires_at.desc())
+                    .limit(1)
+                )
+                await callback.message.answer(
+                    trial_replace_unavailable_text(latest_subscription),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb.trial_expiry_keyboard(),
+                )
+                await callback.answer("Срок закончился", show_alert=True)
             else:
                 await callback.answer("Не получилось заменить sub. Напишите в поддержку.", show_alert=True)
             return
@@ -551,23 +770,21 @@ async def buy_plan(callback: CallbackQuery) -> None:
             return
         order = await create_order(session, user, plan_code)
     if order.payment_provider == PAYMENT_PROVIDER_MANUAL_SBP:
-        await callback.message.answer(
-            manual_sbp_payment_text(order, plan),
-            reply_markup=kb.manual_sbp_keyboard(order.id),
-            parse_mode=ParseMode.HTML,
-        )
+        order_text = manual_sbp_payment_text(order, plan)
+        order_keyboard = kb.manual_sbp_keyboard(order.id)
     elif order.payment_provider == PAYMENT_PROVIDER_HYBRID:
-        await callback.message.answer(
-            hybrid_payment_text(order, plan),
-            reply_markup=kb.check_payment_keyboard(order.id, donation_url_for_order(order)),
-            parse_mode=ParseMode.HTML,
-        )
+        order_text = hybrid_payment_text(order, plan)
+        order_keyboard = kb.check_payment_keyboard(order.id, donation_url_for_order(order))
     else:
-        await callback.message.answer(
-            payment_text(order, plan),
-            reply_markup=kb.check_payment_keyboard(order.id, donation_url_for_order(order)),
-            parse_mode=ParseMode.HTML,
-        )
+        order_text = payment_text(order, plan)
+        order_keyboard = kb.check_payment_keyboard(order.id, donation_url_for_order(order))
+
+    await callback.message.answer_photo(FSInputFile(PAYMENT_INSTRUCTION_IMAGE))
+    await callback.message.answer(
+        f"{PAYMENT_INSTRUCTION_POINTER}\n\n{order_text}",
+        reply_markup=order_keyboard,
+        parse_mode=ParseMode.HTML,
+    )
     await callback.answer()
 
 

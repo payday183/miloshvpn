@@ -4,7 +4,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models import Subscription, VpnKey
 from app.services.direct_node_admin import release_direct_key_slots
-from app.services.vpn import revoke_key_remote
+from app.services.vpn import release_slots_after_backend_move, revoke_key_remote
 from app.timeutils import utcnow
 
 
@@ -85,4 +85,50 @@ async def retry_expired_key_revokes(session: AsyncSession, *, limit: int = 200) 
         revoked_keys += 1
 
     await session.commit()
+    return {"revoked_keys": revoked_keys, "failed_revokes": failed_revokes}
+
+
+async def revoke_scheduled_key_rotations(session: AsyncSession, *, limit: int = 200) -> dict[str, int]:
+    now = utcnow()
+    keys = (
+        await session.scalars(
+            select(VpnKey)
+            .where(
+                VpnKey.active.is_(True),
+                VpnKey.key_type == "private",
+                VpnKey.revoked_at.is_not(None),
+                VpnKey.revoked_at <= now,
+            )
+            .order_by(VpnKey.revoked_at, VpnKey.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+    ).all()
+
+    revoked_keys = 0
+    failed_revokes = 0
+    for key in keys:
+        replacement = await session.scalar(
+            select(VpnKey)
+            .where(
+                VpnKey.user_id == key.user_id,
+                VpnKey.key_type == "private",
+                VpnKey.active.is_(True),
+                VpnKey.id != key.id,
+            )
+            .order_by(VpnKey.created_at.desc(), VpnKey.id.desc())
+            .limit(1)
+        )
+        try:
+            await revoke_key_remote(session, key)
+        except Exception:
+            failed_revokes += 1
+            continue
+
+        key.active = False
+        if replacement is not None:
+            await release_slots_after_backend_move(session, key, replacement)
+        revoked_keys += 1
+
+    await session.flush()
     return {"revoked_keys": revoked_keys, "failed_revokes": failed_revokes}

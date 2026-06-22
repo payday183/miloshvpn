@@ -151,12 +151,94 @@ async def run_lightweight_migrations(conn: AsyncConnection) -> None:
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_subscriptions_node_id ON direct_subscriptions (node_id)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_subscriptions_subscription_token ON direct_subscriptions (subscription_token)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_subscriptions_status ON direct_subscriptions (status)"))
+    await conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS subscription_reminders ("
+            "id SERIAL PRIMARY KEY, "
+            "subscription_id INTEGER NOT NULL REFERENCES subscriptions(id), "
+            "user_id INTEGER NOT NULL REFERENCES users(id), "
+            "reminder_type VARCHAR(64) NOT NULL, "
+            "sent_at TIMESTAMP WITH TIME ZONE NOT NULL, "
+            "response VARCHAR(64), "
+            "responded_at TIMESTAMP WITH TIME ZONE, "
+            "CONSTRAINT uq_subscription_reminders_type UNIQUE (subscription_id, reminder_type)"
+            ")"
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_subscription_reminders_subscription_id ON subscription_reminders (subscription_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_subscription_reminders_user_id ON subscription_reminders (user_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_subscription_reminders_reminder_type ON subscription_reminders (reminder_type)"))
+    await conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS user_feedback ("
+            "id SERIAL PRIMARY KEY, "
+            "user_id INTEGER NOT NULL REFERENCES users(id), "
+            "subscription_id INTEGER REFERENCES subscriptions(id), "
+            "reminder_id INTEGER REFERENCES subscription_reminders(id), "
+            "source VARCHAR(64) NOT NULL DEFAULT 'trial_feedback', "
+            "rating VARCHAR(64), "
+            "text TEXT, "
+            "created_at TIMESTAMP WITH TIME ZONE NOT NULL, "
+            "sent_to_admin_at TIMESTAMP WITH TIME ZONE"
+            ")"
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_user_feedback_user_id ON user_feedback (user_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_user_feedback_subscription_id ON user_feedback (subscription_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_user_feedback_reminder_id ON user_feedback (reminder_id)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_user_feedback_source ON user_feedback (source)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_user_feedback_rating ON user_feedback (rating)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_user_feedback_created_at ON user_feedback (created_at)"))
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_user_feedback_sent_to_admin_at ON user_feedback (sent_to_admin_at)"))
     await conn.execute(text("ALTER TABLE vpn_keys ADD COLUMN IF NOT EXISTS node_id INTEGER"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_vpn_keys_node_id ON vpn_keys (node_id)"))
     await conn.execute(text("ALTER TABLE vpn_keys ADD COLUMN IF NOT EXISTS x3ui_sub_id VARCHAR(64)"))
     await conn.execute(text("ALTER TABLE vpn_keys ADD COLUMN IF NOT EXISTS x3ui_inbound_ids JSON"))
     await conn.execute(text("ALTER TABLE vpn_keys ADD COLUMN IF NOT EXISTS server_label VARCHAR(255)"))
     await conn.execute(text("ALTER TABLE vpn_keys ADD COLUMN IF NOT EXISTS limit_ip INTEGER"))
+    await conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS user_key_activity_snapshots ("
+            "id SERIAL PRIMARY KEY, "
+            "user_id INTEGER NOT NULL REFERENCES users(id), "
+            "key_id INTEGER REFERENCES vpn_keys(id), "
+            "node_id VARCHAR(64), "
+            "sampled_at TIMESTAMP WITH TIME ZONE NOT NULL, "
+            "online BOOLEAN NOT NULL DEFAULT FALSE, "
+            "up_bytes BIGINT NOT NULL DEFAULT 0, "
+            "down_bytes BIGINT NOT NULL DEFAULT 0, "
+            "inbound_count INTEGER NOT NULL DEFAULT 0, "
+            "active_inbounds INTEGER NOT NULL DEFAULT 0, "
+            "matched_clients INTEGER NOT NULL DEFAULT 0, "
+            "source VARCHAR(32) NOT NULL DEFAULT 'detail', "
+            "error TEXT"
+            ")"
+        )
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_user_key_activity_snapshots_user_id ON user_key_activity_snapshots (user_id)")
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_user_key_activity_snapshots_key_id ON user_key_activity_snapshots (key_id)")
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_user_key_activity_snapshots_node_id ON user_key_activity_snapshots (node_id)")
+    )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_user_key_activity_snapshots_sampled_at "
+            "ON user_key_activity_snapshots (sampled_at)"
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_user_key_activity_snapshots_user_sampled "
+            "ON user_key_activity_snapshots (user_id, sampled_at)"
+        )
+    )
+    await conn.execute(
+        text("CREATE INDEX IF NOT EXISTS ix_user_key_activity_snapshots_online ON user_key_activity_snapshots (online)")
+    )
     await conn.execute(
         text(
             "DO $$ BEGIN "

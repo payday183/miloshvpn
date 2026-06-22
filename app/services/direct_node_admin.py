@@ -285,13 +285,17 @@ async def create_or_replace_user_direct_key(
     session: AsyncSession,
     user: User,
     subscription: Subscription,
+    *,
+    node_config: DirectNodeConfig | None = None,
+    require_flags: bool = True,
+    revoke_existing: bool = True,
 ) -> VpnKey:
     settings = get_settings()
-    if not direct_node_user_provisioning_requested(settings):
+    if require_flags and not direct_node_user_provisioning_requested(settings):
         raise RuntimeError("Direct-node user provisioning is disabled by env flags")
     direct_subscription_url(settings, "self-check", public_only=True)
 
-    node_config = await default_user_direct_node_config(session, settings)
+    node_config = node_config or await default_user_direct_node_config(session, settings)
     if node_config is None:
         raise RuntimeError("Direct-node user node is not configured")
 
@@ -304,6 +308,7 @@ async def create_or_replace_user_direct_key(
 
     x3ui = x3ui_client_for_config(node_config, settings)
     created_remote_inbound_ids: list[int] = []
+    provisioned_client = None
     try:
         slots_with_templates = await assigned_slots_for_user(session, user.id, node_config.node_id, templates)
         if len(slots_with_templates) < len(templates):
@@ -330,12 +335,16 @@ async def create_or_replace_user_direct_key(
                 slot.updated_at = utcnow()
                 slots_with_templates.append((slot, template))
 
-        direct_email = f"direct_user_{user.id}_{node_config.node_id}"
-        for stale_email in (direct_email, f"direct_admin_{user.id}_{node_config.node_id}"):
-            try:
-                await x3ui.revoke_client(client_uuid="", email=stale_email)
-            except Exception:
-                pass
+        direct_email = f"direct_user_{user.id}_{uuid4().hex[:8]}_{node_config.node_id}"
+        if revoke_existing:
+            for stale_email in (
+                f"direct_user_{user.id}_{node_config.node_id}",
+                f"direct_admin_{user.id}_{node_config.node_id}",
+            ):
+                try:
+                    await x3ui.revoke_client(client_uuid="", email=stale_email)
+                except Exception:
+                    pass
 
         provisioned_client = await x3ui.create_subscription_client(
             email=direct_email,
@@ -345,7 +354,8 @@ async def create_or_replace_user_direct_key(
             inbound_ids=[slot.inbound_id for slot, _ in slots_with_templates if slot.inbound_id],
             limit_ip=settings.direct_node_user_limit_ip,
         )
-        await revoke_user_direct_or_system_keys(session, user.id, node_config)
+        if revoke_existing:
+            await revoke_user_direct_or_system_keys(session, user.id, node_config)
         direct_subscription = await create_or_get_direct_subscription(
             session,
             settings,
@@ -383,6 +393,14 @@ async def create_or_replace_user_direct_key(
         await session.flush()
         return key
     except Exception:
+        if provisioned_client is not None:
+            try:
+                await x3ui.revoke_client(
+                    client_uuid=provisioned_client.client_uuid,
+                    email=provisioned_client.email,
+                )
+            except Exception:
+                logger.exception("Failed to cleanup direct-node client after provisioning error")
         for inbound_id in reversed(created_remote_inbound_ids):
             try:
                 await delete_x3ui_inbound(x3ui, inbound_id)
@@ -438,7 +456,7 @@ async def revoke_user_direct_or_system_keys(
     now = utcnow()
     for key in keys:
         try:
-            await revoke_key_remote(session, key, node_config=node_config)
+            await revoke_key_remote(session, key)
         finally:
             key.active = False
             key.revoked_at = now
@@ -464,6 +482,11 @@ def is_direct_vpn_key(key: VpnKey) -> bool:
 
 
 async def direct_node_config_for_key(session: AsyncSession, key: VpnKey) -> DirectNodeConfig | None:
+    if "_" in key.email:
+        config = await direct_node_config_by_id(session, key.email.rsplit("_", 1)[-1])
+        if config is not None:
+            return config
+
     subscription = await session.scalar(
         select(DirectSubscription)
         .where(DirectSubscription.user_id == key.user_id, DirectSubscription.status == "active")
@@ -471,12 +494,15 @@ async def direct_node_config_for_key(session: AsyncSession, key: VpnKey) -> Dire
     )
     if subscription is not None:
         return await direct_node_config_by_id(session, subscription.node_id)
-    if "_" in key.email:
-        return await direct_node_config_by_id(session, key.email.rsplit("_", 1)[-1])
     return None
 
 
 async def direct_node_id_for_key(session: AsyncSession, key: VpnKey) -> str | None:
+    if "_" in key.email:
+        config = await direct_node_config_by_id(session, key.email.rsplit("_", 1)[-1])
+        if config is not None:
+            return config.node_id
+
     subscription = await session.scalar(
         select(DirectSubscription)
         .where(DirectSubscription.user_id == key.user_id)
@@ -484,8 +510,6 @@ async def direct_node_id_for_key(session: AsyncSession, key: VpnKey) -> str | No
     )
     if subscription is not None:
         return subscription.node_id
-    if "_" in key.email:
-        return key.email.rsplit("_", 1)[-1]
     return None
 
 
@@ -623,7 +647,7 @@ async def upsert_direct_profiles_for_client(
 
 
 def direct_server_label(node_config: DirectNodeConfig, profiles_count: int) -> str:
-    return "MiloshVPN"
+    return f"{node_config.country_flag} {node_config.name}: {profiles_count} inbound(s)"
 
 
 def env_direct_node_config(settings: Settings | None = None) -> DirectNodeConfig:

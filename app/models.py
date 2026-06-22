@@ -212,6 +212,37 @@ class Subscription(Base):
     keys: Mapped[list["VpnKey"]] = relationship(back_populates="subscription")
 
 
+class SubscriptionReminder(Base):
+    __tablename__ = "subscription_reminders"
+    __table_args__ = (UniqueConstraint("subscription_id", "reminder_type", name="uq_subscription_reminders_type"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    subscription_id: Mapped[int] = mapped_column(ForeignKey("subscriptions.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    reminder_type: Mapped[str] = mapped_column(String(64), index=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    response: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UserFeedback(Base):
+    __tablename__ = "user_feedback"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    subscription_id: Mapped[int | None] = mapped_column(ForeignKey("subscriptions.id"), nullable=True, index=True)
+    reminder_id: Mapped[int | None] = mapped_column(ForeignKey("subscription_reminders.id"), nullable=True, index=True)
+    source: Mapped[str] = mapped_column(String(64), default="trial_feedback", index=True)
+    rating: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    sent_to_admin_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+
+    user: Mapped[User] = relationship()
+    subscription: Mapped[Subscription | None] = relationship()
+    reminder: Mapped[SubscriptionReminder | None] = relationship()
+
+
 class VpnKey(Base):
     __tablename__ = "vpn_keys"
 
@@ -248,6 +279,24 @@ class DonationEvent(Base):
     currency: Mapped[str] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     raw: Mapped[dict[str, Any]] = mapped_column(JSON)
+
+
+class UserKeyActivitySnapshot(Base):
+    __tablename__ = "user_key_activity_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    key_id: Mapped[int | None] = mapped_column(ForeignKey("vpn_keys.id"), nullable=True, index=True)
+    node_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    sampled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    online: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    up_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    down_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    inbound_count: Mapped[int] = mapped_column(Integer, default=0)
+    active_inbounds: Mapped[int] = mapped_column(Integer, default=0)
+    matched_clients: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(32), default="detail")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class BotAdmin(Base):

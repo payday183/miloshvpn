@@ -7,7 +7,7 @@ import httpx
 from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.services.billing import poll_donations
-from app.services.expiry import expire_subscriptions, retry_expired_key_revokes
+from app.services.expiry import expire_subscriptions, retry_expired_key_revokes, revoke_scheduled_key_rotations
 from app.services.payment_notifications import notify_paid_orders
 from app.services.payment_moderation import expire_unconfirmed_orders
 from app.services.public_keys import (
@@ -20,6 +20,7 @@ from app.services.public_keys import (
     seconds_until_next_public_key_post,
 )
 from app.services.system_x3ui import collect_system_x3ui_state
+from app.services.trial_notifications import send_trial_lifecycle_notifications
 from app.services.x3ui import X3UIError
 
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 DONATION_AUTH_RETRY_SECONDS = 15 * 60
+TRIAL_NOTIFICATION_LOOP_SECONDS = 60 * 60
+KEY_ROTATION_CLEANUP_LOOP_SECONDS = 30
 
 
 async def donation_loop() -> None:
@@ -143,6 +146,44 @@ async def expired_subscription_loop() -> None:
         await asyncio.sleep(settings.expired_subscription_cleanup_interval_seconds)
 
 
+async def trial_notification_loop() -> None:
+    settings = get_settings()
+    bot = Bot(settings.bot_token) if settings.bot_token else None
+    if bot is None:
+        logger.warning("Trial notifications are disabled because BOT_TOKEN is empty")
+
+    while True:
+        if bot is not None:
+            async with SessionLocal() as session:
+                try:
+                    sent = await send_trial_lifecycle_notifications(session, bot)
+                    await session.commit()
+                    if sent:
+                        logger.info("Sent trial lifecycle notifications: %s", sent)
+                except Exception:
+                    await session.rollback()
+                    logger.exception("Trial lifecycle notifications failed")
+        await asyncio.sleep(TRIAL_NOTIFICATION_LOOP_SECONDS)
+
+
+async def key_rotation_cleanup_loop() -> None:
+    while True:
+        async with SessionLocal() as session:
+            try:
+                result = await revoke_scheduled_key_rotations(session)
+                await session.commit()
+                if result["revoked_keys"] or result["failed_revokes"]:
+                    logger.info(
+                        "Scheduled key rotation cleanup: revoked=%s failed=%s",
+                        result["revoked_keys"],
+                        result["failed_revokes"],
+                    )
+            except Exception:
+                await session.rollback()
+                logger.exception("Scheduled key rotation cleanup failed")
+        await asyncio.sleep(KEY_ROTATION_CLEANUP_LOOP_SECONDS)
+
+
 async def main() -> None:
     await init_db()
     await asyncio.gather(
@@ -150,6 +191,8 @@ async def main() -> None:
         public_key_loop(),
         node_status_loop(),
         expired_subscription_loop(),
+        trial_notification_loop(),
+        key_rotation_cleanup_loop(),
     )
 
 

@@ -98,6 +98,56 @@ def channel_gate_text() -> str:
     )
 
 
+def trial_replace_unavailable_text(subscription: Subscription | None) -> str:
+    if subscription is not None and subscription.plan_code == TRIAL_PLAN_CODE:
+        title = "Триал закончился"
+    else:
+        title = "Активная подписка закончилась"
+    return (
+        f"⏳ <b>{title}</b>\n\n"
+        "Заменить sub можно только при активной подписке: новый срок через замену не выдаётся.\n\n"
+        "Чтобы продолжить пользоваться MiloshVPN, можно пригласить друга и получить <b>+3 дня</b> "
+        "или купить базовый тариф на 30 дней за <b>75 RUB</b>."
+    )
+
+
+def trial_one_day_reminder_text(subscription: Subscription) -> str:
+    return (
+        "⏳ <b>Триал подходит к концу</b>\n\n"
+        f"До финиша осталось примерно <b>{remaining_days_text(subscription)}</b>.\n\n"
+        "Если хочешь продолжить бесплатно — пригласи друга по реферальной ссылке. "
+        "Когда друг запустит бота, подпишется на канал и нажмёт проверку, тебе добавится <b>+3 дня</b>.\n\n"
+        "Или можно сразу купить базовую подписку на 30 дней и 500 ГБ за <b>75 RUB</b>."
+    )
+
+
+def trial_feedback_reminder_text(subscription: Subscription) -> str:
+    return (
+        "✨ Хорошего дня!\n\n"
+        "Пусть сегодня всё подключается быстро, страницы открываются спокойно, "
+        "а нужные сервисы работают без лишней суеты.\n\n"
+        f"Твой триал активен ещё примерно <b>{remaining_days_text(subscription)}</b>. "
+        "Спасибо, что пользуешься MiloshVPN: твоя оценка помогает сделать сервис лучше и удобнее.\n\n"
+        "Как тебе работа VPN сейчас?"
+    )
+
+
+def trial_feedback_thanks_text(response: str) -> str:
+    if response == "custom":
+        return (
+            "Спасибо! Напиши отзыв одним сообщением прямо сюда.\n\n"
+            "Мы его прочитаем, сохраним и учтём в работе над MiloshVPN."
+        )
+    return "Спасибо за оценку! Мы учтём обратную связь и будем делать MiloshVPN лучше."
+
+
+def trial_custom_feedback_saved_text() -> str:
+    return (
+        "Спасибо, отзыв сохранён.\n\n"
+        "Мы его прочитаем и учтём. Хорошего дня и стабильного подключения!"
+    )
+
+
 def subscription_title(subscription: Subscription, plan: Plan | None = None) -> str:
     if subscription.plan_code == TRIAL_PLAN_CODE:
         return "Триал"
@@ -142,21 +192,24 @@ def plans_text(plans: list[Plan]) -> str:
 
 def payment_text(order: Order, plan: Plan) -> str:
     required_amount = max(Decimal(order.amount_rub), Decimal(plan.price_rub))
-    code_frame = f"----\n<code>{escape(order.payment_code)}</code>\n----"
+    payment_code = escape(order.payment_code)
+    code_separator = "--------------------------------------"
     return (
         "🧾 Заказ готов\n\n"
         f"Тариф: <b>{escape(plan.title)}</b>\n"
-        f"\nСумма: <b>{format_price(required_amount)} RUB</b>\n\n"
-        "👇 Код для сообщения DonationAlerts. Нажми по нему и скопируй:\n"
-        f"{code_frame}\n"
+        f"Сумма: <b>{format_price(required_amount)} RUB</b>\n\n"
+        "👇 Нажми на код и скопируй его:\n"
+        f"{code_separator}\n"
+        f" <code>{payment_code}</code>\n"
+        f"{code_separator}\n\n"
         "Как оплатить:\n"
-        "\n1. Нажми кнопку <b>Оплатить</b> ниже.\n"
-        "\n2. В DonationAlerts вручную поставь сумму из этого сообщения.\n"
-        "\n3. В поле сообщения вставь код из рамки.\n"
-        "\n4. Если DonationAlerts открыл EUR или 10 ₽, выбери RUB и впиши сумму тарифа руками.\n"
-        "\n"
+        "1. Нажми кнопку <b>Оплатить</b> ниже.\n"
+        "2. В DonationAlerts вручную поставь сумму из этого сообщения.\n"
+        "3. В поле сообщения вставь код из красной рамки выше.\n"
+        "4. Если DonationAlerts открыл EUR или 10 ₽, выбери RUB и впиши сумму тарифа руками.\n"
         "5. После оплаты вернись в бот и нажми <b>Проверить оплату</b>.\n\n"
-        "Важно: backend засчитает только правильную сумму в RUB/RUR и именно этот код.\n\n"
+        "Важно: Бот засчитает только правильную сумму в RUB/RUR и именно код из рамки выше. "
+        "При нажатии скопируется только код — без рамки и кавычек.\n\n"
         "MiloshVPN работает на поддержку проекта: суммы помогают оплачивать серверы и держать сервис живым."
     )
 
