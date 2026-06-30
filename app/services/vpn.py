@@ -1,8 +1,9 @@
+import asyncio
 from datetime import timedelta
 import logging
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -13,7 +14,6 @@ from app.services.x3ui import X3UIClient
 from app.timeutils import utcnow
 
 TRIAL_PLAN_CODE = "trial"
-KEY_ROTATION_GRACE_SECONDS = 5 * 60
 logger = logging.getLogger(__name__)
 
 
@@ -100,12 +100,26 @@ async def create_private_key(session: AsyncSession, user: User, subscription: Su
 
     if settings.x3ui_mode == "mock":
         return await create_system_private_key(session, user, subscription)
-    return await create_or_replace_user_direct_key(
-        session,
-        user,
-        subscription,
-        require_flags=False,
-    )
+
+    candidates = await healthy_user_node_candidates(session)
+    errors: list[str] = []
+    for candidate in candidates:
+        savepoint = await session.begin_nested()
+        try:
+            key = await create_or_replace_user_direct_key(
+                session,
+                user,
+                subscription,
+                node_config=candidate["config"],
+                require_flags=False,
+            )
+            await savepoint.commit()
+            return key
+        except Exception as exc:
+            await savepoint.rollback()
+            errors.append(f"{candidate['name']}: {str(exc)[:160]}")
+            logger.exception("Private-key provisioning failed on node %s", candidate["name"])
+    raise RuntimeError("No VPN server accepted the key: " + "; ".join(errors))
 
 
 async def create_system_private_key(
@@ -211,42 +225,77 @@ async def key_backend_name(session: AsyncSession, key: VpnKey) -> str:
     from app.services.direct_node_admin import direct_node_id_for_key, is_direct_vpn_key
 
     if not is_direct_vpn_key(key):
-        return "system"
+        # Legacy private keys were issued on the France group of the system panel.
+        return "fr-1" if key.key_type == "private" else "system"
     return await direct_node_id_for_key(session, key) or "direct"
 
 
-async def replacement_backend_candidates(session: AsyncSession, current_key: VpnKey) -> list[dict[str, object]]:
+async def healthy_user_node_candidates(
+    session: AsyncSession,
+    *,
+    exclude_node_id: str | None = None,
+) -> list[dict[str, object]]:
     from app.services.direct_node_admin import list_direct_node_configs, x3ui_client_for_config
+
+    settings = get_settings()
+    configs = [
+        config
+        for config in await list_direct_node_configs(session)
+        if config.node_id != exclude_node_id
+        and config.api_base_url.strip()
+        and (config.api_token.strip() or (config.api_username.strip() and config.api_password.strip()))
+        and (config.public_host.strip() or config.public_ip.strip())
+        and config.status != "offline"
+    ]
+    health = await asyncio.gather(
+        *(x3ui_client_for_config(config, settings).list_inbounds() for config in configs),
+        return_exceptions=True,
+    )
+
+    active_keys = (
+        await session.execute(
+            select(VpnKey.user_id, VpnKey.email).where(
+                VpnKey.active.is_(True),
+                VpnKey.key_type == "private",
+                VpnKey.user_id.is_not(None),
+            )
+        )
+    ).all()
+    users_by_node: dict[str, set[int]] = {config.node_id: set() for config in configs}
+    known_node_ids = tuple(config.node_id for config in configs)
+    for user_id, email in active_keys:
+        matched_node_id = next(
+            (node_id for node_id in known_node_ids if str(email).endswith(f"_{node_id}")),
+            None,
+        )
+        if matched_node_id is None and "fr-1" in users_by_node and str(email).startswith("milosh_"):
+            matched_node_id = "fr-1"
+        if matched_node_id is not None:
+            users_by_node[matched_node_id].add(int(user_id))
 
     candidates: list[dict[str, object]] = []
     errors: list[str] = []
-
-    settings = get_settings()
-    for config in await list_direct_node_configs(session):
-        if not config.api_base_url.strip() or not (config.public_host.strip() or config.public_ip.strip()):
+    for config, result in zip(configs, health, strict=True):
+        if isinstance(result, Exception):
+            errors.append(f"{config.node_id}: {str(result)[:160]}")
             continue
-        try:
-            await x3ui_client_for_config(config, settings).list_inbounds()
-            load = int(
-                await session.scalar(
-                    select(func.count(func.distinct(VpnKey.user_id))).where(
-                        VpnKey.active.is_(True),
-                        VpnKey.key_type == "private",
-                        VpnKey.user_id.is_not(None),
-                        VpnKey.email.like(f"direct_user_%_{config.node_id}"),
-                    )
-                )
-                or 0
-            )
-            candidates.append({"name": config.node_id, "load": load, "config": config})
-        except Exception as exc:
-            errors.append(f"{config.node_id}: {str(exc)[:160]}")
+        candidates.append(
+            {
+                "name": config.node_id,
+                "load": len(users_by_node.get(config.node_id, set())),
+                "config": config,
+            }
+        )
 
     if not candidates:
         raise RuntimeError("No healthy VPN servers: " + "; ".join(errors))
 
+    return sorted(candidates, key=lambda item: (int(item["load"]), str(item["name"])))
+
+
+async def replacement_backend_candidates(session: AsyncSession, current_key: VpnKey) -> list[dict[str, object]]:
     current_backend = await key_backend_name(session, current_key)
-    return sorted(candidates, key=lambda item: (int(item["load"]), item["name"] == current_backend, str(item["name"])))
+    return await healthy_user_node_candidates(session, exclude_node_id=current_backend)
 
 
 async def release_slots_after_backend_move(session: AsyncSession, old_key: VpnKey, new_key: VpnKey) -> None:

@@ -154,8 +154,12 @@ async def run_admin_direct_node_create(session: AsyncSession, admin_user: User) 
     if node_config is None:
         raise RuntimeError(f"Direct-node узел {settings.admin_test_node_id} не найден")
 
-    existing_subscription = await active_direct_subscription(session, admin_user.id, node_config.node_id)
-    existing_profiles = await active_direct_profiles(session, admin_user.id, node_config.node_id)
+    existing_subscription = await active_direct_subscription(
+        session, admin_user.id, node_config.node_id, key_type="admin"
+    )
+    existing_profiles = await active_direct_profiles(
+        session, admin_user.id, node_config.node_id, key_type="admin"
+    )
     if existing_subscription is not None and len(existing_profiles) >= settings.admin_test_profiles_count:
         return DirectNodeProvisionResult(
             created=False,
@@ -237,10 +241,13 @@ async def run_admin_direct_node_create(session: AsyncSession, admin_user: User) 
                     client_id=provisioned_client.client_uuid,
                     secret_value=provisioned_client.client_uuid,
                     public_link=public_link,
+                    key_type="admin",
                 )
                 created_profiles.append(profile)
 
-        subscription = await create_or_get_direct_subscription(session, settings, node_config, admin_user)
+        subscription = await create_or_get_direct_subscription(
+            session, settings, node_config, admin_user, key_type="admin"
+        )
         await upsert_direct_node(session, node_config, status="online")
         await session.commit()
     except Exception:
@@ -263,7 +270,11 @@ async def run_admin_direct_node_create(session: AsyncSession, admin_user: User) 
         created=bool(created_profiles),
         reused=False,
         subscription_url=subscription.subscription_url,
-        profiles_count=len(await active_direct_profiles(session, admin_user.id, node_config.node_id)),
+        profiles_count=len(
+            await active_direct_profiles(
+                session, admin_user.id, node_config.node_id, key_type="admin"
+            )
+        ),
         checks=checks,
     )
 
@@ -295,6 +306,8 @@ async def create_or_replace_user_direct_key(
     limit_ip: int | None = None,
     expires_at: datetime | None = None,
     traffic_gb: int | None = None,
+    reuse_assigned_slots: bool = True,
+    use_pool_subscription: bool = True,
 ) -> VpnKey:
     settings = get_settings()
     if require_flags and not direct_node_user_provisioning_requested(settings):
@@ -316,7 +329,18 @@ async def create_or_replace_user_direct_key(
     created_remote_inbound_ids: list[int] = []
     provisioned_client = None
     try:
-        slots_with_templates = await assigned_slots_for_user(session, user.id, node_config.node_id, templates)
+        slots_with_templates = (
+            await assigned_slots_for_user(
+                session,
+                user.id,
+                node_config.node_id,
+                templates,
+                key_type=key_type,
+            )
+            if reuse_assigned_slots
+            else []
+        )
+        reused_existing_slots = len(slots_with_templates) == len(templates)
         if len(slots_with_templates) < len(templates):
             planned_slots = await plan_direct_node_slots(
                 session,
@@ -362,6 +386,12 @@ async def create_or_replace_user_direct_key(
             inbound_ids=[slot.inbound_id for slot, _ in slots_with_templates if slot.inbound_id],
             limit_ip=settings.direct_node_user_limit_ip if limit_ip is None else limit_ip,
         )
+        if not reused_existing_slots:
+            await x3ui.assert_exclusive_client(
+                inbound_ids=provisioned_client.inbound_ids,
+                client_uuid=provisioned_client.client_uuid,
+                email=provisioned_client.email,
+            )
         if revoke_existing:
             if key_type == "admin":
                 await revoke_user_admin_keys_for_node(session, user.id, node_config)
@@ -369,21 +399,32 @@ async def create_or_replace_user_direct_key(
                 await revoke_active_public_keys(session)
             else:
                 await revoke_user_direct_or_system_keys(session, user.id, node_config)
-        direct_subscription = await create_or_get_direct_subscription(
-            session,
-            settings,
-            node_config,
-            user,
-            public_only=True,
-        )
+        if reused_existing_slots:
+            await x3ui.assert_exclusive_client(
+                inbound_ids=provisioned_client.inbound_ids,
+                client_uuid=provisioned_client.client_uuid,
+                email=provisioned_client.email,
+            )
+        direct_subscription = None
+        if use_pool_subscription:
+            direct_subscription = await create_or_get_direct_subscription(
+                session,
+                settings,
+                node_config,
+                user,
+                public_only=True,
+                key_type=key_type,
+            )
 
-        await upsert_direct_profiles_for_client(
-            session,
-            user,
-            node_config=node_config,
-            slots_with_templates=slots_with_templates,
-            provisioned_client=provisioned_client,
-        )
+        if use_pool_subscription:
+            await upsert_direct_profiles_for_client(
+                session,
+                user,
+                node_config=node_config,
+                slots_with_templates=slots_with_templates,
+                provisioned_client=provisioned_client,
+                key_type=key_type,
+            )
 
         key = VpnKey(
             node_id=None,
@@ -396,7 +437,11 @@ async def create_or_replace_user_direct_key(
             server_label=direct_server_label(node_config, len(slots_with_templates)),
             limit_ip=settings.direct_node_user_limit_ip if limit_ip is None else limit_ip,
             email=provisioned_client.email,
-            vless_uri=direct_subscription.subscription_url,
+            vless_uri=(
+                direct_subscription.subscription_url
+                if direct_subscription is not None
+                else provisioned_client.vless_uri
+            ),
             active=True,
             created_at=utcnow(),
             expires_at=effective_expires_at,
@@ -434,10 +479,12 @@ async def create_or_replace_admin_direct_key(
         None,
         node_config=node_config,
         require_flags=False,
-        revoke_existing=True,
+        revoke_existing=False,
         key_type="admin",
         email_prefix="direct_admin",
         limit_ip=settings.x3ui_admin_limit_ip,
+        reuse_assigned_slots=False,
+        use_pool_subscription=False,
     )
 
 
@@ -472,7 +519,27 @@ async def assigned_slots_for_user(
     user_id: int,
     node_id: str,
     templates: list[DirectProtocolTemplate],
+    *,
+    key_type: str = "private",
 ) -> list[tuple[DirectInboundSlot, DirectProtocolTemplate]]:
+    active_keys = (
+        await session.scalars(
+            select(VpnKey).where(
+                VpnKey.user_id == user_id,
+                VpnKey.key_type == key_type,
+                VpnKey.active.is_(True),
+            )
+        )
+    ).all()
+    active_inbound_ids = {
+        int(inbound_id)
+        for key in active_keys
+        for inbound_id in (key.x3ui_inbound_ids or [])
+        if int(inbound_id) > 0
+    }
+    if not active_inbound_ids:
+        return []
+
     template_by_code = {template.template_code: template for template in templates}
     slots = (
         await session.scalars(
@@ -482,17 +549,22 @@ async def assigned_slots_for_user(
                 DirectInboundSlot.assigned_user_id == user_id,
                 DirectInboundSlot.status == "assigned",
                 DirectInboundSlot.inbound_id.is_not(None),
+                DirectInboundSlot.inbound_id.in_(active_inbound_ids),
             )
             .order_by(DirectInboundSlot.slot_number)
             .with_for_update()
         )
     ).all()
-    result: list[tuple[DirectInboundSlot, DirectProtocolTemplate]] = []
+    slot_by_template: dict[str, DirectInboundSlot] = {}
     for slot in slots:
         template = template_by_code.get(slot.template_code)
-        if template is not None:
-            result.append((slot, template))
-    return result
+        if template is not None and template.template_code not in slot_by_template:
+            slot_by_template[template.template_code] = slot
+    return [
+        (slot_by_template[template.template_code], template)
+        for template in templates
+        if template.template_code in slot_by_template
+    ]
 
 
 async def revoke_user_direct_or_system_keys(
@@ -509,11 +581,20 @@ async def revoke_user_direct_or_system_keys(
     ).all()
     now = utcnow()
     for key in keys:
+        old_node_id = await direct_node_id_for_key(session, key) if is_direct_vpn_key(key) else None
         try:
             await revoke_key_remote(session, key)
         finally:
             key.active = False
             key.revoked_at = now
+        if old_node_id is not None and old_node_id != node_config.node_id:
+            await release_direct_key_slots(
+                session,
+                key,
+                status="moved",
+                release_slots=True,
+                delete_remote_inbounds=False,
+            )
 
 
 async def revoke_active_public_keys(session: AsyncSession) -> None:
@@ -589,7 +670,11 @@ async def direct_node_config_for_key(session: AsyncSession, key: VpnKey) -> Dire
 
     subscription = await session.scalar(
         select(DirectSubscription)
-        .where(DirectSubscription.user_id == key.user_id, DirectSubscription.status == "active")
+        .where(
+            DirectSubscription.user_id == key.user_id,
+            DirectSubscription.key_type == key.key_type,
+            DirectSubscription.status == "active",
+        )
         .order_by(DirectSubscription.updated_at.desc(), DirectSubscription.id.desc())
     )
     if subscription is not None:
@@ -604,8 +689,10 @@ async def direct_node_id_for_key(session: AsyncSession, key: VpnKey) -> str | No
             return config.node_id
 
     subscription = await session.scalar(
-        select(DirectSubscription)
-        .where(DirectSubscription.user_id == key.user_id)
+        select(DirectSubscription).where(
+            DirectSubscription.user_id == key.user_id,
+            DirectSubscription.key_type == key.key_type,
+        )
         .order_by(DirectSubscription.updated_at.desc(), DirectSubscription.id.desc())
     )
     if subscription is not None:
@@ -628,15 +715,18 @@ async def release_direct_key_slots(
         return
 
     now = utcnow()
-    subscriptions = (
-        await session.scalars(
-            select(DirectSubscription).where(
-                DirectSubscription.user_id == key.user_id,
-                DirectSubscription.node_id == node_id,
-                DirectSubscription.status == "active",
+    subscriptions = []
+    if key.key_type == "private":
+        subscriptions = (
+            await session.scalars(
+                select(DirectSubscription).where(
+                    DirectSubscription.user_id == key.user_id,
+                    DirectSubscription.node_id == node_id,
+                    DirectSubscription.key_type == key.key_type,
+                    DirectSubscription.status == "active",
+                )
             )
-        )
-    ).all()
+        ).all()
     for subscription in subscriptions:
         subscription.status = status
         subscription.updated_at = now
@@ -648,21 +738,22 @@ async def release_direct_key_slots(
                 DirectUserProfile.user_id == key.user_id,
                 DirectUserProfile.node_id == node_id,
                 DirectUserProfile.status == "active",
+                DirectUserProfile.client_id == key.x3ui_client_uuid,
+                DirectUserProfile.inbound_id.in_(key.x3ui_inbound_ids or [-1]),
             )
             .with_for_update()
         )
     ).all()
-    slot_ids = [profile.inbound_slot_id for profile in profiles]
     for profile in profiles:
         profile.status = status
         profile.updated_at = now
 
-    if slot_ids and (release_slots or delete_remote_inbounds):
+    if (release_slots or delete_remote_inbounds) and key.x3ui_inbound_ids:
         slots = (
             await session.scalars(
                 select(DirectInboundSlot)
                 .where(
-                    DirectInboundSlot.id.in_(slot_ids),
+                    DirectInboundSlot.inbound_id.in_(key.x3ui_inbound_ids),
                     DirectInboundSlot.assigned_user_id == key.user_id,
                     DirectInboundSlot.status == "assigned",
                 )
@@ -703,10 +794,16 @@ async def upsert_direct_profiles_for_client(
     node_config: DirectNodeConfig,
     slots_with_templates: list[tuple[DirectInboundSlot, DirectProtocolTemplate]],
     provisioned_client,
+    key_type: str = "private",
 ) -> None:
     existing_profiles = {
         profile.inbound_slot_id: profile
-        for profile in await active_direct_profiles(session, user.id, node_config.node_id)
+        for profile in await active_direct_profiles(
+            session,
+            user.id,
+            node_config.node_id,
+            key_type=key_type,
+        )
     }
     for slot, template in slots_with_templates:
         public_link = direct_link_for_slot(slot, provisioned_client.links, node_config)
@@ -732,9 +829,11 @@ async def upsert_direct_profiles_for_client(
                 client_id=provisioned_client.client_uuid,
                 secret_value=provisioned_client.client_uuid,
                 public_link=public_link,
+                key_type=key_type,
             )
             continue
         profile.template_code = template.template_code
+        profile.key_type = key_type
         profile.protocol = template.protocol
         profile.inbound_id = slot.inbound_id
         profile.port = slot.port
@@ -913,26 +1012,38 @@ async def active_direct_subscription(
     session: AsyncSession,
     user_id: int,
     node_id: str,
+    *,
+    key_type: str = "private",
 ) -> DirectSubscription | None:
     return await session.scalar(
         select(DirectSubscription).where(
             DirectSubscription.user_id == user_id,
             DirectSubscription.node_id == node_id,
+            DirectSubscription.key_type == key_type,
             DirectSubscription.status == "active",
         )
     )
 
 
-async def active_direct_profiles(session: AsyncSession, user_id: int, node_id: str) -> list[DirectUserProfile]:
+async def active_direct_profiles(
+    session: AsyncSession,
+    user_id: int,
+    node_id: str,
+    *,
+    key_type: str | None = None,
+) -> list[DirectUserProfile]:
+    conditions = [
+        DirectUserProfile.user_id == user_id,
+        DirectUserProfile.node_id == node_id,
+        DirectUserProfile.status == "active",
+    ]
+    if key_type is not None:
+        conditions.append(DirectUserProfile.key_type == key_type)
     return list(
         (
             await session.scalars(
                 select(DirectUserProfile)
-                .where(
-                    DirectUserProfile.user_id == user_id,
-                    DirectUserProfile.node_id == node_id,
-                    DirectUserProfile.status == "active",
-                )
+                .where(*conditions)
                 .order_by(DirectUserProfile.id)
             )
         ).all()
@@ -1387,7 +1498,17 @@ def build_inbound_payload(
         "protocol": template.x3ui_protocol,
         "settings": json.dumps(inbound_settings, ensure_ascii=False),
         "streamSettings": json.dumps(build_stream_settings(settings, node_config, template), ensure_ascii=False),
-        "sniffing": json.dumps({"enabled": False, "destOverride": [], "metadataOnly": False}, ensure_ascii=False),
+        "sniffing": json.dumps(
+            {
+                "enabled": True,
+                "destOverride": ["http", "tls", "quic"],
+                "metadataOnly": False,
+                "routeOnly": True,
+                "ipsExcluded": [],
+                "domainsExcluded": [],
+            },
+            ensure_ascii=False,
+        ),
     }
 
 
@@ -1428,6 +1549,10 @@ def build_stream_settings(
                 "mode": template.xhttp_mode or "auto",
                 "extra": {"paddingBytes": template.xhttp_padding_bytes or "100-1000"},
             }
+            # XHTTP listens directly on the public interface on these nodes.
+            # Explicitly reject client-supplied X-Forwarded-For values so IP
+            # limits, online status, and audit logs cannot be spoofed.
+            stream["sockopt"] = {"trustedXForwardedFor": ["127.0.0.1/32", "::1/128"]}
         return stream
 
     if template.x3ui_protocol == "hysteria":
@@ -1549,12 +1674,14 @@ async def save_direct_profile(
     client_id: str,
     secret_value: str,
     public_link: str,
+    key_type: str = "private",
 ) -> DirectUserProfile:
     now = utcnow()
     profile = DirectUserProfile(
         user_id=user.id,
         node_id=slot.node_id,
         inbound_slot_id=slot.id,
+        key_type=key_type,
         template_code=template.template_code,
         protocol=template.protocol,
         inbound_id=slot.inbound_id,
@@ -1578,8 +1705,14 @@ async def create_or_get_direct_subscription(
     user: User,
     *,
     public_only: bool = False,
+    key_type: str = "private",
 ) -> DirectSubscription:
-    existing = await active_direct_subscription(session, user.id, node_config.node_id)
+    existing = await active_direct_subscription(
+        session,
+        user.id,
+        node_config.node_id,
+        key_type=key_type,
+    )
     if existing is not None:
         existing.status = "active"
         existing.subscription_url = direct_subscription_url(
@@ -1596,6 +1729,7 @@ async def create_or_get_direct_subscription(
     subscription = DirectSubscription(
         user_id=user.id,
         node_id=node_config.node_id,
+        key_type=key_type,
         subscription_token=token,
         subscription_url=direct_subscription_url(settings, token, public_only=public_only),
         status="active",
@@ -1638,6 +1772,7 @@ async def direct_subscription_payload(session: AsyncSession, token: str) -> str 
             .where(
                 DirectUserProfile.user_id == subscription.user_id,
                 DirectUserProfile.node_id == subscription.node_id,
+                DirectUserProfile.key_type == subscription.key_type,
                 DirectUserProfile.status == "active",
             )
             .order_by(DirectUserProfile.id)

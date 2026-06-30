@@ -162,6 +162,34 @@ class X3UIClient:
             links=links,
         )
 
+    async def assert_exclusive_client(
+        self,
+        *,
+        inbound_ids: Sequence[int],
+        client_uuid: str,
+        email: str,
+    ) -> None:
+        """Verify that every dedicated inbound contains this client and no other clients."""
+        inbound_ids = tuple(dict.fromkeys(int(item) for item in inbound_ids if int(item) > 0))
+        if not inbound_ids:
+            raise X3UIError("No 3x-ui inbounds supplied for exclusive-client verification")
+
+        async with self._client() as client:
+            await self._login(client)
+            for inbound_id in inbound_ids:
+                inbound = await self._get_inbound(client, inbound_id)
+                clients = self._inbound_clients(inbound)
+                expected = self._find_inbound_client(
+                    inbound,
+                    email=email,
+                    client_uuid=client_uuid,
+                )
+                if expected is None or len(clients) != 1:
+                    raise X3UIError(
+                        f"Dedicated inbound {inbound_id} must contain exactly one expected client; "
+                        f"found {len(clients)}"
+                    )
+
     async def _ensure_client_in_inbounds(
         self,
         client: httpx.AsyncClient,

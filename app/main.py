@@ -1,4 +1,5 @@
 import base64
+import json
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -20,6 +21,78 @@ from app.timeutils import utcnow
 app = FastAPI(title="MiloshVPN Control Center")
 app.include_router(admin_router)
 SUBSCRIPTION_DISPLAY_NAME = "MiloshVPN"
+HAPP_ROUTING_PROFILE = {
+    "Name": "MiloshVPN — RU direct + abuse protection",
+    "GlobalProxy": "true",
+    "RemoteDNSType": "DoU",
+    "RemoteDNSDomain": "",
+    "RemoteDNSIP": "1.1.1.3",
+    "DomesticDNSType": "DoU",
+    "DomesticDNSDomain": "",
+    "DomesticDNSIP": "77.88.8.7",
+    "Geoipurl": "",
+    "Geositeurl": "",
+    "LastUpdated": "",
+    "DnsHosts": {},
+    "DirectSites": [
+        # Russian zones are always reached outside the VPN.  Explicit domains
+        # cover banking/payment and Russian app backends hosted under generic
+        # TLDs, while keeping the profile independent from geosite.dat.
+        "regexp:.*\\.(ru|su|xn--p1ai)$",
+        "domain:sber.com",
+        "domain:sberbank.com",
+        "domain:tbank.com",
+        "domain:tinkoff.com",
+        "domain:tinkoff-group.com",
+        "domain:alfabank.com",
+        "domain:vtb.com",
+        "domain:gazprombank.com",
+        "domain:raiffeisen.com",
+        "domain:home.bank",
+        "domain:qiwi.com",
+        "domain:koronapay.com",
+        "domain:unistream.com",
+        "domain:robokassa.com",
+        "domain:payselection.com",
+        "domain:best2pay.net",
+        "domain:vk.com",
+        "domain:vk.me",
+        "domain:userapi.com",
+        "domain:my.com",
+        "domain:mycdn.me",
+        "domain:vkuseraudio.net",
+        "domain:vkuserlive.net",
+        "domain:yandex.com",
+        "domain:yandex.net",
+        "domain:yandexcloud.net",
+        "domain:yastatic.net",
+        "domain:ozon.com",
+        "domain:ozonusercontent.com",
+        "domain:avito.st",
+        "domain:rambler.co",
+        "domain:rutube.com",
+        "domain:2gis.com",
+        "domain:kaspersky.com",
+        "domain:drweb.com",
+    ],
+    "DirectIp": ["geoip:private", "geoip:ru"],
+    "ProxySites": [],
+    "ProxyIp": [],
+    # Keep the Happ profile independent from optional geosite sections.
+    # Category enforcement remains global on the VPN servers.
+    "BlockSites": [
+        "domain:doubleclick.net",
+        "domain:googleadservices.com",
+        "domain:googlesyndication.com",
+        "domain:googletagservices.com",
+        "domain:google-analytics.com",
+        "domain:adservice.google.com",
+        "domain:ads.youtube.com",
+    ],
+    "BlockIp": [],
+    "DomainStrategy": "IPIfNonMatch",
+    "FakeDNS": "false",
+}
 
 
 @app.on_event("startup")
@@ -66,9 +139,19 @@ async def direct_subscription(token: str, session: AsyncSession = Depends(get_se
 
 def subscription_response_headers() -> dict[str, str]:
     encoded_title = base64.b64encode(SUBSCRIPTION_DISPLAY_NAME.encode("utf-8")).decode("ascii")
+    routing_json = json.dumps(HAPP_ROUTING_PROFILE, ensure_ascii=False, separators=(",", ":"))
+    encoded_routing = base64.b64encode(routing_json.encode("utf-8")).decode("ascii")
     filename = f"{SUBSCRIPTION_DISPLAY_NAME}.txt"
     return {
         "profile-title": f"base64:{encoded_title}",
+        "Routing-Enable": "true",
+        # `onadd` is required for existing Happ installations: `add` updates
+        # the profile but only activates it when it is the first routing
+        # profile on the device.
+        "Routing": f"happ://routing/onadd/{encoded_routing}",
+        "profile-update-interval": "24",
+        "ping-type": "proxy-head",
+        "check-url-via-proxy": "https://cp.cloudflare.com/generate_204",
         "Content-Disposition": f'attachment; filename="{filename}"; filename*=UTF-8\'\'{quote(filename)}',
     }
 

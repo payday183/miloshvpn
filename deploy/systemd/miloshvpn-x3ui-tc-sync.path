@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch the generated Xray config for new inbound ports
+
+[Path]
+PathChanged=/usr/local/x-ui/bin/config.json
+Unit=miloshvpn-x3ui-tc-sync.service
+
+[Install]
+WantedBy=multi-user.target
+

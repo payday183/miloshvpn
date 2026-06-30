@@ -1,0 +1,18 @@
+[Unit]
+Description=Synchronize per-inbound 3x-ui traffic limits
+Wants=network-online.target
+After=network-online.target x-ui.service
+ConditionPathExists=/usr/local/x-ui/bin/config.json
+
+[Service]
+Type=oneshot
+Environment=PROFILE_RATE=40mbit
+ExecStart=/usr/local/sbin/miloshvpn-x3ui-tc-sync
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ProtectSystem=strict
+ReadWritePaths=/run
+

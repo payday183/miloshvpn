@@ -4,6 +4,8 @@ table inet miloshvpn_abuse_guard {
     flags interval
     elements = {
       1080,
+      1337,
+      2710,
       3128,
       6881-6999,
       8118,
@@ -28,13 +30,13 @@ table inet miloshvpn_abuse_guard {
 
   chain output {
     type filter hook output priority 0; policy accept;
-    tcp dport @blocked_tcp_ports reject
-    udp dport @blocked_udp_ports reject
+    tcp dport @blocked_tcp_ports counter reject
+    udp dport @blocked_udp_ports counter reject
   }
 
   chain forward {
     type filter hook forward priority 0; policy accept;
-    tcp dport @blocked_tcp_ports reject
-    udp dport @blocked_udp_ports reject
+    tcp dport @blocked_tcp_ports counter reject
+    udp dport @blocked_udp_ports counter reject
   }
 }

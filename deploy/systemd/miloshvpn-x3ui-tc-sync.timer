@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic fallback sync for 3x-ui traffic limits
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=30s
+AccuracySec=5s
+Unit=miloshvpn-x3ui-tc-sync.service
+
+[Install]
+WantedBy=timers.target
+

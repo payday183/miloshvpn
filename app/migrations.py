@@ -112,6 +112,7 @@ async def run_lightweight_migrations(conn: AsyncConnection) -> None:
             "user_id INTEGER NOT NULL REFERENCES users(id), "
             "node_id VARCHAR(64) NOT NULL REFERENCES direct_nodes(id), "
             "inbound_slot_id INTEGER NOT NULL REFERENCES direct_inbound_slots(id), "
+            "key_type VARCHAR(32) NOT NULL DEFAULT 'private', "
             "template_code VARCHAR(128) NOT NULL DEFAULT '', "
             "protocol VARCHAR(64) NOT NULL, "
             "inbound_id INTEGER, "
@@ -130,6 +131,13 @@ async def run_lightweight_migrations(conn: AsyncConnection) -> None:
     await conn.execute(
         text("CREATE INDEX IF NOT EXISTS ix_direct_user_profiles_inbound_slot_id ON direct_user_profiles (inbound_slot_id)")
     )
+    await conn.execute(
+        text(
+            "ALTER TABLE direct_user_profiles ADD COLUMN IF NOT EXISTS "
+            "key_type VARCHAR(32) NOT NULL DEFAULT 'private'"
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_user_profiles_key_type ON direct_user_profiles (key_type)"))
     await conn.execute(text("ALTER TABLE direct_user_profiles ADD COLUMN IF NOT EXISTS template_code VARCHAR(128) NOT NULL DEFAULT ''"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_user_profiles_template_code ON direct_user_profiles (template_code)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_user_profiles_protocol ON direct_user_profiles (protocol)"))
@@ -140,6 +148,7 @@ async def run_lightweight_migrations(conn: AsyncConnection) -> None:
             "id SERIAL PRIMARY KEY, "
             "user_id INTEGER NOT NULL REFERENCES users(id), "
             "node_id VARCHAR(64) NOT NULL REFERENCES direct_nodes(id), "
+            "key_type VARCHAR(32) NOT NULL DEFAULT 'private', "
             "subscription_token VARCHAR(128) NOT NULL, "
             "subscription_url TEXT NOT NULL, "
             "status VARCHAR(32) DEFAULT 'active', "
@@ -151,8 +160,32 @@ async def run_lightweight_migrations(conn: AsyncConnection) -> None:
     )
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_subscriptions_user_id ON direct_subscriptions (user_id)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_subscriptions_node_id ON direct_subscriptions (node_id)"))
+    await conn.execute(
+        text(
+            "ALTER TABLE direct_subscriptions ADD COLUMN IF NOT EXISTS "
+            "key_type VARCHAR(32) NOT NULL DEFAULT 'private'"
+        )
+    )
+    await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_subscriptions_key_type ON direct_subscriptions (key_type)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_subscriptions_subscription_token ON direct_subscriptions (subscription_token)"))
     await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_direct_subscriptions_status ON direct_subscriptions (status)"))
+    await conn.execute(
+        text(
+            "UPDATE direct_user_profiles AS profile SET key_type = vpn_key.key_type "
+            "FROM vpn_keys AS vpn_key "
+            "WHERE profile.client_id = vpn_key.x3ui_client_uuid "
+            "AND profile.key_type IS DISTINCT FROM vpn_key.key_type"
+        )
+    )
+    await conn.execute(
+        text(
+            "UPDATE direct_subscriptions AS subscription SET key_type = vpn_key.key_type "
+            "FROM vpn_keys AS vpn_key "
+            "WHERE subscription.user_id = vpn_key.user_id "
+            "AND subscription.subscription_url = vpn_key.vless_uri "
+            "AND subscription.key_type IS DISTINCT FROM vpn_key.key_type"
+        )
+    )
     await conn.execute(
         text(
             "CREATE TABLE IF NOT EXISTS subscription_reminders ("

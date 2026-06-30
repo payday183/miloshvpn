@@ -12,15 +12,19 @@ from app.timeutils import utcnow
 
 async def create_admin_key(session: AsyncSession, user: User) -> VpnKey:
     settings = get_settings()
-    if settings.admin_direct_node_id.strip():
+    if settings.x3ui_mode != "mock":
         from app.services.direct_node_admin import create_or_replace_admin_direct_key, direct_node_config_by_id
 
-        node_config = await direct_node_config_by_id(session, settings.admin_direct_node_id.strip())
+        node_id = "nl-local"
+        node_config = await direct_node_config_by_id(session, node_id)
+        if node_config is None and settings.admin_direct_node_id.strip():
+            node_id = settings.admin_direct_node_id.strip()
+            node_config = await direct_node_config_by_id(session, node_id)
         if node_config is None:
-            raise RuntimeError(f"Admin direct node was not found: {settings.admin_direct_node_id}")
+            raise RuntimeError(f"Admin direct node was not found: {node_id}")
+        if node_config.country_code.upper() != "NL":
+            raise RuntimeError("Admin keys must be issued on the Netherlands node")
         return await create_or_replace_admin_direct_key(session, user, node_config)
-    if settings.x3ui_mode != "mock":
-        raise RuntimeError("ADMIN_DIRECT_NODE_ID is required for live admin key issuing")
 
     now = utcnow()
     selection = await select_inbounds_for_client("admin")

@@ -45,8 +45,8 @@ class Settings(BaseSettings):
     x3ui_user_inbound_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
     x3ui_admin_inbound_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
     x3ui_public_inbound_ids: Annotated[list[int], NoDecode] = Field(default_factory=list)
-    x3ui_user_limit_ip: int = 2
-    x3ui_admin_limit_ip: int = 1
+    x3ui_user_limit_ip: int = 0
+    x3ui_admin_limit_ip: int = 0
     x3ui_public_limit_ip: int = 0
     direct_node_user_limit_ip: int = 0
     node_selection_mode: Literal["active", "least_loaded"] = "least_loaded"

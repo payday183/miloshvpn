@@ -1,0 +1,68 @@
+{
+  "domainStrategy": "IPIfNonMatch",
+  "rules": [
+    {
+      "type": "field",
+      "domain": [
+        "domain:doubleclick.net",
+        "domain:googleadservices.com",
+        "domain:googlesyndication.com",
+        "domain:googletagservices.com",
+        "domain:google-analytics.com",
+        "domain:adservice.google.com",
+        "domain:ads.youtube.com"
+      ],
+      "outboundTag": "blocked"
+    },
+    {
+      "type": "field",
+      "ip": [
+        "geoip:private",
+        "geoip:ru"
+      ],
+      "outboundTag": "direct"
+    },
+    {
+      "type": "field",
+      "domain": [
+        "regexp:.*\\.(ru|su|xn--p1ai)$",
+        "domain:sber.com",
+        "domain:sberbank.com",
+        "domain:tbank.com",
+        "domain:tinkoff.com",
+        "domain:tinkoff-group.com",
+        "domain:alfabank.com",
+        "domain:vtb.com",
+        "domain:gazprombank.com",
+        "domain:raiffeisen.com",
+        "domain:home.bank",
+        "domain:qiwi.com",
+        "domain:koronapay.com",
+        "domain:unistream.com",
+        "domain:robokassa.com",
+        "domain:payselection.com",
+        "domain:best2pay.net",
+        "domain:vk.com",
+        "domain:vk.me",
+        "domain:userapi.com",
+        "domain:my.com",
+        "domain:mycdn.me",
+        "domain:vkuseraudio.net",
+        "domain:vkuserlive.net",
+        "domain:yandex.com",
+        "domain:yandex.net",
+        "domain:yandexcloud.net",
+        "domain:yastatic.net",
+        "domain:ozon.com",
+        "domain:ozonusercontent.com",
+        "domain:avito.st",
+        "domain:rambler.co",
+        "domain:rutube.com",
+        "domain:2gis.com",
+        "domain:kaspersky.com",
+        "domain:drweb.com"
+      ],
+      "outboundTag": "direct"
+    }
+  ]
+}

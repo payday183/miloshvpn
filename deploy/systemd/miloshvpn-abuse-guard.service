@@ -1,0 +1,15 @@
+[Unit]
+Description=MiloshVPN nftables Tor and P2P abuse guard
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStartPre=-/usr/sbin/nft delete table inet miloshvpn_abuse_guard
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/miloshvpn-abuse-guard.nft
+ExecReload=-/usr/sbin/nft delete table inet miloshvpn_abuse_guard
+ExecReload=/usr/sbin/nft -f /etc/nftables.d/miloshvpn-abuse-guard.nft
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
